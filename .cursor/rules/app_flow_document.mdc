@@ -1,0 +1,22 @@
+---
+description: 
+globs: 
+alwaysApply: true
+---
+User Flow:
+1. [Start] -> App Launch
+2. Main Screen:
+   - Button: "Select Images/Folder"
+   - List: Selected Files Preview
+   - Button: "Process Images" (disabled until selection)
+3. Processing Screen:
+   - Progress Bar (with % overlay)
+   - Cancel Button
+4. [Success] -> Notification + "Open Folder" Button
+5. [Error] -> Retry/Cancel Dialog
+
+System Flow:
+Selection -> Validation -> Border Detection -> Cropping -> Save -> Cleanup
+
+
+

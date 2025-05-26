@@ -1,0 +1,37 @@
+---
+description: 
+globs: 
+alwaysApply: false
+---
+Phase 1: Setup (Week 1)
+
+ Electron + React boilerplate
+
+ IPC communication scaffold
+
+ OpenCV.js WASM integration
+
+Phase 2: Core Features (Week 2-3)
+
+ Image selection dialog
+
+ Batch processing queue
+
+ Progress reporting system
+
+Phase 3: Testing (Week 4)
+
+ Edge case tests (transparent PNGs)
+
+ Memory leak checks
+
+ Cross-platform builds
+
+Usage Instructions for Cursor:
+
+Create new /docs folder in project
+
+Copy each section to individual .md files
+
+Use @docs reference during development:
+

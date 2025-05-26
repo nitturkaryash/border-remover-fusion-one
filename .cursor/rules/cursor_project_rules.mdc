@@ -1,0 +1,43 @@
+---
+description: 
+globs: 
+alwaysApply: false
+---
+# .cursor/rules/error-prevention.mdc
+---
+description: Prevent common failure modes in AI-assisted coding
+globs: "**/*"
+priority: 1
+---
+
+### Core Error Prevention Rules
+
+1. **Context Anchoring**
+- Always reference @package.json and @tsconfig.json before making dependency changes[8][15]
+- Never assume knowledge of unopened files - verify existence with `fs.existsSync()` before referencing[7][12]
+- Maintain 3-file context window: current file + 2 most recently edited[3][14]
+
+2. **Code Placement Guardrails**
+- New components go in `src/components/${kebab-case-name}`
+- Utilities belong in `src/lib/utils/${category}`
+- Never modify `src/types/*` without explicit instruction[9][17]
+- Use boundary comments when editing partial files:
+
+3. **Implementation Completeness**
+- Ban placeholder comments ("// ...rest of code")[17][19]
+- Require full function implementations even if stubbed
+- Enforce error handling before I/O operations:
+
+
+4. **Boundary Enforcement**
+- Never modify `*.config.*` files without confirmation[12][15]
+- Preserve existing code style (no "helpful" formatting changes)[6][18]
+- Isolate third-party API interactions to `src/services/providers/`[7][16]
+
+### Anti-Pattern Triggers
+Watch for these phrases in prompts and require clarification:
+- "It should just know..." → Demand explicit context
+- "Like before..." → Require specific file references
+- "Simple implementation..." → Enforce complexity checks
+
+

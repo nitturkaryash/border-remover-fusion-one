@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Black Border Remover</title>
+    <style>
+      #loading-status {
+        position: fixed;
+        top: 0;
+        left: 0;
+        right: 0;
+        padding: 10px;
+        background-color: #f0f0f0;
+        border-bottom: 1px solid #ccc;
+        font-family: monospace;
+        z-index: 9999;
+      }
+      .error {
+        color: red;
+        font-weight: bold;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="loading-status">Loading app...</div>
+    <div id="root"></div>
+    <script>
+      // Debug helper to show loading status
+      const updateStatus = (message, isError = false) => {
+        const statusEl = document.getElementById('loading-status');
+        if (statusEl) {
+          statusEl.textContent = message;
+          if (isError) statusEl.classList.add('error');
+          else statusEl.classList.remove('error');
+        }
+      };
+      
+      // Check if running in Electron
+      window.addEventListener('DOMContentLoaded', () => {
+        updateStatus('DOM loaded, checking environment...');
+        
+        // After a short delay, check if Electron API is available
+        setTimeout(() => {
+          if (window.electronAPI) {
+            updateStatus('Electron API detected, initializing React app...');
+          } else {
+            updateStatus('Electron API not detected (browser mode or API not loaded)', true);
+          }
+        }, 500);
+      });
+      
+      // Remove status bar once React mounts
+      window.addEventListener('load', () => {
+        updateStatus('Window loaded, waiting for React to initialize...');
+        // After React should have initialized
+        setTimeout(() => {
+          const rootEl = document.getElementById('root');
+          if (rootEl && rootEl.children.length > 0) {
+            // React has mounted something, hide the status
+            const statusEl = document.getElementById('loading-status');
+            if (statusEl) statusEl.style.display = 'none';
+          } else {
+            updateStatus('React app did not initialize properly', true);
+          }
+        }, 2000);
+      });
+    </script>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html> 

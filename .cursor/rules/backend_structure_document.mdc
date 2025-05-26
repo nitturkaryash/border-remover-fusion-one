@@ -1,0 +1,23 @@
+---
+description: 
+globs: 
+alwaysApply: false
+---
+
+
+
+src/
+├── main/
+│   ├── processors/
+│   │   ├── BorderDetector.js (OpenCV logic)
+│   │   └── ImageBatch.js (queue management)
+│   ├── utils/
+│   │   ├── fileValidator.js
+│   │   └── logger.js (winston)
+├── preload.js (IPC exposure)
+└── main.js (Electron setup)
+
+Key Modules:
+- ImageProcessor: Handles OpenCV ops in worker threads
+- FileManager: Maintains input/output directory structure
+- ErrorHandler: Centralized error logging/recovery

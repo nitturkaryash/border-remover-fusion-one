@@ -1,0 +1,36 @@
+---
+description: 
+globs: 
+alwaysApply: true
+---
+Black Border Remover Desktop App
+
+Overview
+Offline Electron app for batch detection/cropping of black borders in images. Targets users needing bulk processing of scanned docs/screenshots.
+
+Key Features
+
+Single-click image/folder selection
+
+Visual progress indicator (0-100%)
+
+System-tray notifications for completion
+
+Output folder auto-organization (YYYY-MM-DD_processed)
+
+Technical Constraints
+
+Max 500 images/batch
+
+Supported formats: JPG/PNG/TIFF
+
+Min hardware: 4GB RAM, Dual-core CPU
+
+Success Metrics
+
+<2s response time for 50-image batches
+
+95% accuracy in border detection
+
+<1% crash rate during processing
+

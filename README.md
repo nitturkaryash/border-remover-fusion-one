@@ -1,0 +1,130 @@
+# Black Border Remover Desktop App
+
+Offline Electron app for batch detection/cropping of black borders in images and PDFs. Targets users needing bulk processing of scanned documents and screenshots.
+
+## Features
+
+- **Single-click image/folder selection**
+- **Visual progress indicator (0-100%)**
+- **System-tray notifications for completion**
+- **Output folder auto-organization (YYYY-MM-DD_processed)**
+- **PDF Support** - Process first page of PDF documents
+- **Supported formats**: JPG, PNG, TIFF, PDF
+- **Batch processing** up to 500 files
+- **Advanced border detection** with noise reduction and edge refinement
+
+## System Requirements
+
+### Hardware
+- **Min**: 4GB RAM, Dual-core CPU
+- **Recommended**: 8GB RAM, Quad-core CPU for faster batch processing
+
+### System Dependencies
+
+**macOS:**
+```bash
+# Install required dependencies via Homebrew
+brew install ghostscript graphicsmagick
+```
+
+**Linux (Ubuntu/Debian):**
+```bash
+sudo apt-get update
+sudo apt-get install ghostscript graphicsmagick imagemagick
+```
+
+**Windows:**
+- Download and install [Ghostscript](https://www.ghostscript.com/download/gsdnld.html)
+- Download and install [GraphicsMagick](http://www.graphicsmagick.org/download.html)
+- Ensure both are added to your system PATH
+
+### Why these dependencies?
+- **Ghostscript**: Required for PDF rendering and conversion
+- **GraphicsMagick**: Required for image processing operations
+- Without these, PDF processing will fail with empty output folders
+
+## Installation
+
+1. **Clone the repository**
+```bash
+git clone [repository-url]
+cd fusion-one-norder-correction-tool
+```
+
+2. **Install dependencies**
+```bash
+npm install
+```
+
+3. **Install system dependencies** (see System Dependencies section above)
+
+4. **Start the application**
+```bash
+npm start
+```
+
+## Usage
+
+1. **Launch the app**
+2. **Click "Select Images/Folder"** to choose files
+3. **Select images or PDFs** (supports multi-selection)
+4. **Click "Process Images"** to start batch processing
+5. **Monitor progress** with the real-time progress bar
+6. **Results** are saved to a dated folder (e.g., `2025-05-26_processed`)
+
+## Technical Details
+
+- **Max file size**: 50MB per file
+- **Processing timeout**: 30 seconds per image
+- **Memory management**: 500MB limit with automatic cleanup
+- **Concurrency**: Up to 3 files processed simultaneously
+- **Performance target**: <2s for 1920x1080 images
+
+## Troubleshooting
+
+### Empty Output Folder
+If you get an empty output folder after processing:
+
+1. **Check system dependencies**:
+   ```bash
+   # macOS - verify installations
+   gs -version
+   gm version
+   
+   # If missing, install with:
+   brew install ghostscript graphicsmagick
+   ```
+
+2. **Check file formats**: Ensure files are supported (JPG, PNG, TIFF, PDF)
+
+3. **Check file permissions**: Ensure the app can read input files and write to output directory
+
+4. **Check application logs**: Look for detailed error messages in the console
+
+### PDF Processing Issues
+- Ensure **Ghostscript** and **GraphicsMagick** are installed and in your system PATH
+- Verify PDF files are not corrupted or password-protected
+- Check that PDFs contain visual content (text-only PDFs may not process correctly)
+
+## Development
+
+```bash
+# Install dependencies
+npm install
+
+# Start in development mode
+npm run dev
+
+# Build for production
+npm run build
+
+# Run tests
+npm test
+```
+
+## Success Metrics
+
+- **<2s response time** for 50-image batches
+- **95% accuracy** in border detection
+- **<1% crash rate** during processing
+- **Support for 500+ images** per batch

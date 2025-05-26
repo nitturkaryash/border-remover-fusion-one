@@ -1,0 +1,64 @@
+---
+description: 
+globs: 
+alwaysApply: false
+---
+---
+description: Frontend guidelines for Black Border Remover, including Three.js integration
+globs: ["src/renderer/**", "src/components/**"]
+alwaysApply: true
+---
+
+# Frontend Guidelines
+
+## General UI Principles
+- Use shadcn/ui and Tailwind CSS for all standard UI components.
+- Maintain a minimalist, accessible, and responsive design.
+- Follow atomic design principles for component structure (Atoms, Molecules, Organisms).
+- All interactive elements must be keyboard accessible and use semantic HTML/ARIA.
+
+## Three.js & 3D Animations
+
+### When to Use
+- Use Three.js for all 3D visualizations, advanced animations, or interactive effects in the app.
+- For simple UI animations, prefer CSS or Framer Motion.
+
+### Integration Approach
+- **Preferred:** Use [React Three Fiber](mdc:https:/docs.pmnd.rs/react-three-fiber) (`@react-three/fiber`) as the React renderer for Three.js. This allows you to build 3D scenes declaratively as React components, leveraging React’s state and lifecycle[4][5].
+- **Install:**  
+- `three`: Core Three.js library
+- `@react-three/fiber`: React renderer for Three.js
+- `@react-three/drei`: Useful helpers and abstractions for common 3D tasks
+
+
+- Place all 3D/Three.js components in `src/components/three/`.
+- Each 3D scene or effect should be a self-contained React component.
+- Use `<Canvas>` from `@react-three/fiber` as the root for any 3D scene.
+- Compose 3D objects as child components of `<Canvas>`, using hooks like `useFrame` for animation[4][5].
+
+
+- Import and use `<CrazyAnimation />` in your main UI as needed.
+
+### Best Practices
+- Keep Three.js logic isolated from standard UI code for maintainability[1].
+- Use React hooks (`useFrame`, `useRef`, `useState`) to control animation and interactivity[5].
+- For complex scenes, split objects and effects into smaller components.
+- Use `@react-three/drei` for lighting, controls, and helpers to speed up development.
+- For performance, avoid unnecessary re-renders and use memoization for static objects.
+
+### Accessibility & Responsiveness
+- Ensure 3D canvases are responsive (use CSS or parent sizing).
+- Provide fallback UI or descriptions for users who cannot view 3D content.
+
+### Resources
+- [React Three Fiber Docs](mdc:https:/docs.pmnd.rs/react-three-fiber)
+- [Three.js Docs](mdc:https:/threejs.org/docs)
+- [drei Helper Library](mdc:https:/docs.pmnd.rs/drei/introduction)
+
+---
+
+
+---
+
+**Follow these guidelines for all frontend and 3D/animation work.**
+
