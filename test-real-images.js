@@ -103,7 +103,7 @@ async function testRealImages() {
           outputPath: path.join(outputDir, `cropped_${path.basename(imagePath, path.extname(imagePath))}.png`),
           threshold: bestResult.threshold,
           minBorderSize: 1,
-          quality: 95
+          quality: 100
         });
         
         if (result.success) {

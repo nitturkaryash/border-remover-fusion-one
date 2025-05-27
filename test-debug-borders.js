@@ -119,7 +119,7 @@ async function debugBorderDetection() {
         outputPath: path.join(outputDir, 'cropped_document.png'),
         threshold: bestResult.threshold,
         minBorderSize: 1,
-        quality: 95
+        quality: 100
       });
       
       if (result.success) {

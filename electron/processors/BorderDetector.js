@@ -24,9 +24,9 @@ const CONFIG = {
   MAX_FILE_SIZE: 50 * 1024 * 1024, // 50MB max file size
   SUPPORTED_FORMATS: ['jpeg', 'jpg', 'png', 'tiff', 'tif', 'webp'],
   
-  // Output settings
-  QUALITY: 95,                   // JPEG quality for output
-  COMPRESSION: 6                 // PNG compression level
+  // Output settings - MAXIMUM QUALITY
+  QUALITY: 100,                  // JPEG quality for output (maximum quality)
+  COMPRESSION: 0                 // PNG compression level (no compression for maximum quality)
 };
 
 // Add PDF to supported formats
@@ -428,7 +428,8 @@ async function cropImage(imageBuffer, borders, options = {}) {
   const { 
     quality = CONFIG.QUALITY, 
     compression = CONFIG.COMPRESSION,
-    rotateFinalOutput = false 
+    rotateFinalOutput = false,
+    preserveOrientation = true  // Add new option to preserve orientation
   } = options;
   
   try {
@@ -463,24 +464,50 @@ async function cropImage(imageBuffer, borders, options = {}) {
       });
     
     // Apply final rotation if needed (for PDFs that should display as portrait)
-    if (rotateFinalOutput) {
+    // But only if preserveOrientation is false
+    if (rotateFinalOutput && !preserveOrientation) {
       logger.info(`[BorderDetector] Applying 90° rotation to final output for portrait display`);
       pipeline = pipeline.rotate(90);
     }
     
-    // Apply format-specific optimization
+    // Apply format-specific optimization for MAXIMUM QUALITY
     switch (metadata.format) {
       case 'jpeg':
-        pipeline = pipeline.jpeg({ quality, progressive: true });
+        pipeline = pipeline.jpeg({ 
+          quality, 
+          progressive: true,
+          mozjpeg: true // Use mozjpeg encoder for better quality
+        });
         break;
       case 'png':
-        pipeline = pipeline.png({ compressionLevel: compression, progressive: true });
+        pipeline = pipeline.png({ 
+          compressionLevel: compression, 
+          progressive: true,
+          palette: false, // Avoid palette compression for better quality
+          quality: 100    // Maximum PNG quality
+        });
         break;
       case 'tiff':
-        pipeline = pipeline.tiff({ compression: 'lzw' });
+        pipeline = pipeline.tiff({ 
+          compression: 'none', // No compression for maximum quality
+          quality: 100
+        });
+        break;
+      case 'webp':
+        pipeline = pipeline.webp({ 
+          quality: 100, 
+          lossless: true, // Use lossless WebP for maximum quality
+          effort: 6       // Maximum compression effort
+        });
         break;
       default:
-        // Keep original format
+        // For unknown formats, save as high-quality PNG
+        pipeline = pipeline.png({ 
+          compressionLevel: 0, 
+          progressive: true,
+          palette: false,
+          quality: 100
+        });
         break;
     }
     
@@ -564,16 +591,23 @@ async function convertPdfToImageBuffer(pdfPath) {
     // Use pdf2pic v3.x API with fromPath method
     logger.info('[BorderDetector-PDF] Initializing pdf2pic converter with fromPath method...');
     
+    // Force a portrait orientation to maintain the document's original orientation
+    // This is critical for proper document viewing - MAXIMUM QUALITY SETTINGS
     const converter = pdf2pic.fromPath(pdfPath, {
-      density: 300, // Higher DPI for better quality
+      density: 600, // Maximum DPI for best quality (doubled from 300)
       format: "png",
-      // Remove fixed width/height to preserve original aspect ratio
-      quality: 100,
+      quality: 100, // Maximum quality
       savePath: "./temp_pdf_conversion", // Temporary path, not used for base64
-      saveFilename: "temp_pdf_page"
+      saveFilename: "temp_pdf_page",
+      // Critical: Force preservation of PDF orientation as it appears in viewer
+      preserveOrientation: true,
+      autoOrient: false,
+      // Use higher resolution dimensions for better quality
+      width: 1190,  // Double standard A4 width for higher resolution
+      height: 1684  // Double standard A4 height for higher resolution
     });
     
-    logger.info('[BorderDetector-PDF] pdf2pic converter initialized successfully');
+    logger.info('[BorderDetector-PDF] pdf2pic converter initialized with portrait orientation');
 
     logger.info('[BorderDetector-PDF] Converter initialized. Attempting to convert page 1...');
     
@@ -755,21 +789,31 @@ async function processImage(imagePath, options = {}) {
         logger.info(`[BorderDetector] Detected PDF, converting first page to image: ${imagePath}`);
         try {
           if (signal && signal.aborted) throw new Error('PDF conversion aborted by signal');
+          
+          // First convert the PDF to an image buffer
           imageBuffer = await convertPdfToImageBuffer(imagePath);
-          imageMeta = await sharp(imageBuffer).metadata(); // Get metadata from converted image
-          logger.info(`[BorderDetector] PDF page converted. Image dimensions: ${imageMeta.width}x${imageMeta.height}`);
+          imageMeta = await sharp(imageBuffer).metadata();
+          logger.info(`[BorderDetector] PDF page converted. Initial dimensions: ${imageMeta.width}x${imageMeta.height}`);
           
-          // Process image as-is, but check if final output should be rotated to portrait for better viewing
-          logger.info(`[BorderDetector] Processing PDF image in original orientation to preserve readable content`);
-          
-          // For PDFs that are landscape but contain portrait documents, we'll rotate the final output
-          const shouldRotateOutput = imageMeta.width > imageMeta.height; // Landscape input = rotate final output
-          if (shouldRotateOutput) {
-            logger.info(`[BorderDetector] Will rotate final output to portrait for better document viewing`);
+          // CRITICAL FIX: Always force portrait orientation for documents
+          // This ensures the document appears as it would in a PDF viewer
+          if (imageMeta.width > imageMeta.height) {
+            logger.info(`[BorderDetector] Forcing portrait orientation for document`);
+            imageBuffer = await sharp(imageBuffer)
+              .rotate(90, { background: { r: 255, g: 255, b: 255, alpha: 1 } })
+              .toBuffer();
+            
+            // Update metadata after rotation
+            imageMeta = await sharp(imageBuffer).metadata();
+            logger.info(`[BorderDetector] Document rotated to portrait. New dimensions: ${imageMeta.width}x${imageMeta.height}`);
+          } else {
+            logger.info(`[BorderDetector] Document already in portrait orientation`);
           }
+          
+          logger.info(`[BorderDetector] Processing document with correct orientation`);
         } catch (conversionError) {
-            logger.error(`[BorderDetector] PDF to Image conversion failed for ${imagePath}: ${conversionError.message}`);
-            throw conversionError; // Re-throw to be caught by the main try-catch
+          logger.error(`[BorderDetector] PDF to Image conversion failed for ${imagePath}: ${conversionError.message}`);
+          throw conversionError;
         }
       } else {
         imageBuffer = await fs.readFile(imagePath);
@@ -812,10 +856,11 @@ async function processImage(imagePath, options = {}) {
         };
       }
       logger.info(`[BorderDetector] Borders detected, cropping to: ${borderData.width}x${borderData.height}`);
-      // Crop image with option to rotate final output for PDFs
-      const shouldRotateForPdf = isPdf && imageMeta.width > imageMeta.height;
+      // Only rotate if explicitly needed - in most cases we want to preserve original orientation
+      const shouldRotateForPdf = false; // Disable automatic rotation to preserve orientation
       const croppedBuffer = await cropImage(imageBuffer, borderData, { 
-        rotateFinalOutput: shouldRotateForPdf 
+        rotateFinalOutput: shouldRotateForPdf,
+        preserveOrientation: true // Always preserve original orientation
       });
       // Generate output path
       let finalOutputPath;

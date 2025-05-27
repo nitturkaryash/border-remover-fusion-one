@@ -187,9 +187,9 @@ const CONFIG = {
   MAX_FILE_SIZE: 50 * 1024 * 1024,      // 50MB max file size
   SUPPORTED_FORMATS: ['jpeg', 'jpg', 'png', 'tiff', 'tif', 'webp'],
   
-  // Output quality
-  QUALITY: 95,                   // JPEG quality
-  COMPRESSION: 6                 // PNG compression
+  // Output quality - MAXIMUM QUALITY
+  QUALITY: 100,                  // JPEG quality (maximum)
+  COMPRESSION: 0                 // PNG compression (no compression)
 };
 ```
 
