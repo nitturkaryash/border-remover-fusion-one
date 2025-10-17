@@ -20,6 +20,12 @@ release/
 .env.test.local
 .env.production.local
 
+# Artifacts & sample assets
+sample\ sets/
+test-images/
+*.pdf
+*.png
+
 # Logs
 npm-debug.log*
 yarn-debug.log*
