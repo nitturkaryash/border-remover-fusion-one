@@ -60,3 +60,39 @@ export async function generateThumbnail(file: File): Promise<string> {
     reader.readAsDataURL(file)
   })
 }
+
+export async function buildFileMetaList(fileList: FileList | File[]): Promise<{
+  files: FileMeta[];
+  unsupportedCount: number;
+}> {
+  const list = Array.isArray(fileList) ? fileList : Array.from(fileList);
+
+  const supportedFiles = list.filter(isSupportedImageType);
+  const unsupportedCount = list.length - supportedFiles.length;
+
+  const files: FileMeta[] = await Promise.all(
+    supportedFiles.map(async (file) => {
+      const meta = createFileMeta(file);
+
+      // Electron adds the absolute path to File objects, browsers do not
+      const possiblePath = (file as unknown as { path?: string }).path;
+      if (possiblePath) {
+        meta.path = possiblePath;
+      }
+
+      const shouldGenerateThumbnail = file.type.startsWith('image/');
+
+      if (shouldGenerateThumbnail) {
+        try {
+          meta.thumbnail = await generateThumbnail(file);
+        } catch (error) {
+          console.error('Failed to generate thumbnail:', error);
+        }
+      }
+
+      return meta;
+    })
+  );
+
+  return { files, unsupportedCount };
+}

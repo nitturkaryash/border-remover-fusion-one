@@ -202,6 +202,7 @@ ipcMain.handle('select-files', async () => {
       path: filePath,
       size: stats.size,
       type: getFileType(filePath),
+      lastModified: Math.floor(stats.mtimeMs),
     };
   });
 });
@@ -242,8 +243,9 @@ ipcMain.handle('show-notification', (event, { title, body }) => {
 });
 
 // Handle starting image processing
-ipcMain.handle('start-image-processing', async (event, filesToProcess) => {
-  logger.info(`[IPC] Received request to process ${filesToProcess.length} files.`);
+ipcMain.handle('start-image-processing', async (event, filesToProcess, options = {}) => {
+  logger.info(`[IPC] Received request to process ${filesToProcess.length} files with options:`, JSON.stringify(options, null, 2));
+  logger.info(`[IPC] Output format specifically:`, options.outputFormat);
   addToQueue(filesToProcess);
   
   // Define how progress and completion are sent back to renderer
@@ -263,8 +265,8 @@ ipcMain.handle('start-image-processing', async (event, filesToProcess) => {
     mainWindow.webContents.send('image-processing-complete', { ...result, outputDir });
   };
 
-  // Start processing the queue (don't wait for it here, it runs in background)
-  processQueue(progressCallback, completionCallback)
+  // Start processing the queue with options (don't wait for it here, it runs in background)
+  processQueue(progressCallback, completionCallback, options)
     .then(() => logger.info('[IPC] processQueue promise resolved (indicates queue processing loop started or finished if empty).'))
     .catch(err => logger.error('[IPC] Error in processQueue execution chain:', err));
 

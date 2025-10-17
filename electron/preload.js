@@ -13,7 +13,7 @@ contextBridge.exposeInMainWorld(
     onSelectFilesRequest: (callback) => ipcRenderer.on('menu-select-images', callback),
 
     // Image Processing IPC
-    startImageProcessing: (files) => ipcRenderer.invoke('start-image-processing', files),
+    startImageProcessing: (files, options) => ipcRenderer.invoke('start-image-processing', files, options),
     cancelImageProcessing: () => ipcRenderer.invoke('cancel-image-processing'),
     onImageProcessingProgress: (callback) => ipcRenderer.on('image-processing-progress', (event, ...args) => callback(...args)),
     onImageProcessingComplete: (callback) => ipcRenderer.on('image-processing-complete', (event, ...args) => callback(...args)),

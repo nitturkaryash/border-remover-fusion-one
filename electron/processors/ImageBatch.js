@@ -119,8 +119,33 @@ async function processQueue(progressCallback, completionCallback, options = {}) 
     // Process results and create response
     const processedFiles = [];
     const errors = [];
+    const seenErrorKeys = new Set();
     let successfulCount = 0;
     let croppedCount = 0;
+
+    const appendError = ({
+      originalFile,
+      filePath,
+      message,
+    }) => {
+      const resolvedPath = filePath || originalFile?.path || 'unknown_file_path';
+      const resolvedMessage = message || 'Unknown processing error';
+      const key = `${resolvedPath}::${resolvedMessage}`;
+
+      if (seenErrorKeys.has(key)) {
+        return;
+      }
+
+      seenErrorKeys.add(key);
+
+      errors.push({
+        fileId: originalFile?.id || 'unknown',
+        fileName: originalFile?.name || path.basename(resolvedPath),
+        filePath: resolvedPath,
+        message: resolvedMessage,
+        timestamp: new Date().toISOString()
+      });
+    };
 
     // This check is important if processBatch itself could fail catastrophically 
     // before returning a structured result (though our current one is designed to always return one)
@@ -134,12 +159,10 @@ async function processQueue(progressCallback, completionCallback, options = {}) 
       if (!originalFile) {
           logger.warn(`[ImageBatch] Could not find original file metadata for path: ${result.originalPath}`);
           // Create a placeholder if not found, to prevent crashes, though this indicates a logic flaw upstream.
-          errors.push({
-            fileId: 'unknown',
-            fileName: path.basename(result.originalPath),
+          appendError({
+            originalFile: null,
             filePath: result.originalPath,
-            message: 'Original file metadata not found during result processing.',
-            timestamp: new Date().toISOString()
+            message: 'Original file metadata not found during result processing.'
           });
           return; // Skip this result
       }
@@ -158,12 +181,10 @@ async function processQueue(progressCallback, completionCallback, options = {}) 
           isPdf: result.isPdf // Pass through PDF flag
         });
       } else {
-        errors.push({
-          fileId: originalFile.id,
-          fileName: originalFile.name,
+        appendError({
+          originalFile,
           filePath: result.originalPath,
-          message: result.error || 'Unknown processing error',
-          timestamp: new Date().toISOString()
+          message: result.error
         });
       }
     });
@@ -171,13 +192,11 @@ async function processQueue(progressCallback, completionCallback, options = {}) 
     // Add any top-level errors from batchResult.errors (e.g., if a chunk failed)
     if (batchResult.errors && Array.isArray(batchResult.errors)) {
         batchResult.errors.forEach(error => {
-            const originalFile = fileMap.get(error.file) || { id: 'unknown', name: path.basename(error.file || 'unknown_file') };
-            errors.push({
-                fileId: originalFile.id,
-                fileName: originalFile.name,
+            const originalFileRef = fileMap.get(error.file) || { id: 'unknown', name: path.basename(error.file || 'unknown_file') };
+            appendError({
+                originalFile: originalFileRef,
                 filePath: error.file || 'unknown_file_path',
-                message: error.error || 'Batch processing chunk error',
-                timestamp: error.timestamp || new Date().toISOString()
+                message: error.error || 'Batch processing chunk error'
             });
         });
     }

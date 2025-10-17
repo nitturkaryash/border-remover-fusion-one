@@ -2,7 +2,7 @@ import React, { useCallback, useState } from 'react';
 import { cn } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
 import { ImagePlus } from 'lucide-react';
-import { createFileMeta, isSupportedImageType, generateThumbnail } from '@/lib/utils';
+import { buildFileMetaList } from '@/lib/utils';
 import { FileMeta } from '@/store/appStore';
 import { useToast } from '@/hooks/use-toast';
 
@@ -35,40 +35,22 @@ export const DropZone: React.FC<DropZoneProps> = ({
   const handleFilesSelected = useCallback(async (fileList: FileList | null) => {
     if (!fileList) return;
     
-    const files = Array.from(fileList);
-    
-    // Filter unsupported file types
-    const supportedFiles = files.filter(isSupportedImageType);
-    const unsupportedCount = files.length - supportedFiles.length;
-    
-    if (unsupportedCount > 0) {
-      toast({
-        title: `${unsupportedCount} unsupported file(s) skipped`,
-        description: 'Only JPG, PNG, TIFF and PDF files are supported',
-        variant: 'default',
-      });
-    }
-    
-    if (supportedFiles.length === 0) return;
-    
     try {
-      // Create FileMeta objects
-      const fileMetas: FileMeta[] = await Promise.all(
-        supportedFiles.map(async (file) => {
-          const meta = createFileMeta(file);
-          
-          try {
-            // Generate thumbnail
-            meta.thumbnail = await generateThumbnail(file);
-          } catch (error) {
-            console.error('Failed to generate thumbnail:', error);
-          }
-          
-          return meta;
-        })
-      );
-      
-      onFilesSelected(fileMetas);
+      const { files, unsupportedCount } = await buildFileMetaList(fileList);
+
+      if (unsupportedCount > 0) {
+        toast({
+          title: `${unsupportedCount} unsupported file(s) skipped`,
+          description: 'Only JPG, PNG, TIFF and PDF files are supported',
+          variant: 'default',
+        });
+      }
+
+      if (files.length === 0) {
+        return;
+      }
+
+      onFilesSelected(files);
     } catch (error) {
       toast({
         title: 'Error processing files',

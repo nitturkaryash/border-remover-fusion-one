@@ -470,45 +470,110 @@ async function cropImage(imageBuffer, borders, options = {}) {
       pipeline = pipeline.rotate(90);
     }
     
-    // Apply format-specific optimization for MAXIMUM QUALITY
-    switch (metadata.format) {
-      case 'jpeg':
-        pipeline = pipeline.jpeg({ 
-          quality, 
-          progressive: true,
-          mozjpeg: true // Use mozjpeg encoder for better quality
-        });
-        break;
-      case 'png':
-        pipeline = pipeline.png({ 
-          compressionLevel: compression, 
-          progressive: true,
-          palette: false, // Avoid palette compression for better quality
-          quality: 100    // Maximum PNG quality
-        });
-        break;
-      case 'tiff':
-        pipeline = pipeline.tiff({ 
-          compression: 'none', // No compression for maximum quality
-          quality: 100
-        });
-        break;
-      case 'webp':
-        pipeline = pipeline.webp({ 
-          quality: 100, 
-          lossless: true, // Use lossless WebP for maximum quality
-          effort: 6       // Maximum compression effort
-        });
-        break;
-      default:
-        // For unknown formats, save as high-quality PNG
-        pipeline = pipeline.png({ 
-          compressionLevel: 0, 
-          progressive: true,
-          palette: false,
-          quality: 100
-        });
-        break;
+    // Apply format-specific optimization based on desired output format
+    const outputFormat = options.outputFormat || 'original';
+    
+    if (outputFormat === 'original') {
+      // Use original format with maximum quality
+      switch (metadata.format) {
+        case 'jpeg':
+          pipeline = pipeline.jpeg({ 
+            quality, 
+            progressive: true,
+            mozjpeg: true // Use mozjpeg encoder for better quality
+          });
+          break;
+        case 'png':
+          pipeline = pipeline.png({ 
+            compressionLevel: compression, 
+            progressive: true,
+            palette: false, // Avoid palette compression for better quality
+            quality: 100    // Maximum PNG quality
+          });
+          break;
+        case 'tiff':
+          pipeline = pipeline.tiff({ 
+            compression: 'none', // No compression for maximum quality
+            quality: 100
+          });
+          break;
+        case 'webp':
+          pipeline = pipeline.webp({ 
+            quality: 100, 
+            lossless: true, // Use lossless WebP for maximum quality
+            effort: 6       // Maximum compression effort
+          });
+          break;
+        default:
+          // For unknown formats, save as high-quality PNG
+          pipeline = pipeline.png({ 
+            compressionLevel: 0, 
+            progressive: true,
+            palette: false,
+            quality: 100
+          });
+          break;
+      }
+    } else {
+      // Convert to specified format
+      switch (outputFormat) {
+        case 'png':
+          pipeline = pipeline.png({ 
+            compressionLevel: compression, 
+            progressive: true,
+            palette: false,
+            quality: 100
+          });
+          break;
+        case 'jpg':
+        case 'jpeg':
+          pipeline = pipeline.jpeg({ 
+            quality, 
+            progressive: true,
+            mozjpeg: true
+          });
+          break;
+        case 'tiff':
+          pipeline = pipeline.tiff({ 
+            compression: 'none',
+            quality: 100
+          });
+          break;
+        case 'webp':
+          pipeline = pipeline.webp({ 
+            quality: 100, 
+            lossless: true,
+            effort: 6
+          });
+          break;
+        case 'pdf':
+          // For PDF output, convert to PNG first (PDFs will be handled separately)
+          pipeline = pipeline.png({ 
+            compressionLevel: 0, 
+            progressive: true,
+            palette: false,
+            quality: 100
+          });
+          break;
+        case 'svg':
+          // For SVG output, convert to PNG first (SVGs will be handled separately)
+          pipeline = pipeline.png({ 
+            compressionLevel: 0, 
+            progressive: true,
+            palette: false,
+            quality: 100
+          });
+          break;
+        default:
+          // Default to PNG for unknown formats
+          pipeline = pipeline.png({ 
+            compressionLevel: 0, 
+            progressive: true,
+            palette: false,
+            quality: 100
+          });
+          break;
+      }
     }
     
     const croppedBuffer = await pipeline.toBuffer();
@@ -525,7 +590,7 @@ async function cropImage(imageBuffer, borders, options = {}) {
 }
 
 /**
- * Generates output file path with organized folder structure
+ * Generates output file path with organized folder structure and format conversion
  * @param {string} originalPath - Original file path
  * @param {object} options - Path generation options
  * @returns {string} - Generated output path
@@ -535,21 +600,44 @@ function generateOutputPath(originalPath, options = {}) {
     outputDir = null,
     preserveStructure = false,
     addTimestamp = true,
-    suffix = '_cropped'
+    suffix = '_cropped',
+    outputFormat = 'original'
   } = options;
   
   const dir = outputDir || path.dirname(originalPath);
-  const ext = path.extname(originalPath);
-  const name = path.basename(originalPath, ext);
+  const originalExt = path.extname(originalPath);
+  const name = path.basename(originalPath, originalExt);
   
   let finalDir = dir;
   
   if (addTimestamp) {
-  const timestamp = new Date().toISOString().split('T')[0]; // YYYY-MM-DD
+    const timestamp = new Date().toISOString().split('T')[0]; // YYYY-MM-DD
     finalDir = path.join(dir, `${timestamp}_processed`);
   }
   
-  const fileName = `${name}${suffix}${ext}`;
+  // Determine output extension based on format
+  let outputExt = originalExt;
+  if (outputFormat !== 'original') {
+    switch (outputFormat) {
+      case 'png':
+        outputExt = '.png';
+        break;
+      case 'jpg':
+      case 'jpeg':
+        outputExt = '.jpg';
+        break;
+      case 'pdf':
+        outputExt = '.pdf';
+        break;
+      case 'svg':
+        outputExt = '.svg';
+        break;
+      default:
+        outputExt = originalExt;
+    }
+  }
+  
+  const fileName = `${name}${suffix}${outputExt}`;
   return path.join(finalDir, fileName);
 }
 
@@ -597,8 +685,8 @@ async function convertPdfToImageBuffer(pdfPath) {
       density: 600, // Maximum DPI for best quality (doubled from 300)
       format: "png",
       quality: 100, // Maximum quality
-      savePath: "./temp_pdf_conversion", // Temporary path, not used for base64
-      saveFilename: "temp_pdf_page",
+      // savePath: "./temp_pdf_conversion", // Temporary path, not used for base64
+      // saveFilename: "temp_pdf_page",
       // Critical: Force preservation of PDF orientation as it appears in viewer
       preserveOrientation: true,
       autoOrient: false,
@@ -767,6 +855,10 @@ async function processImage(imagePath, options = {}) {
   const ext = path.extname(imagePath).toLowerCase().slice(1);
   const isPdf = ext === 'pdf';
 
+  // DEBUG: Add unique call tracking
+  const callId = `processImage_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+  logger.info(`[DEBUG-${callId}] processImage called for ${path.basename(imagePath)} with outputFormat: ${options.outputFormat}`);
+
   // Create timeout promise
   const timeoutPromise = new Promise((_, reject) => {
     setTimeout(() => reject(new Error('Processing timeout')), timeout);
@@ -779,7 +871,7 @@ async function processImage(imagePath, options = {}) {
         logger.info(`[BorderDetector] Processing of ${imagePath} aborted before start.`);
         throw new Error('Processing aborted by signal');
       }
-      logger.info(`[BorderDetector] Starting to process: ${imagePath}`);
+      logger.info(`[BorderDetector] Starting to process: ${imagePath}`, { outputFormat: options.outputFormat });
       const validation = await validateFile(imagePath);
       if (!validation.valid) {
         throw new Error(validation.error);
@@ -823,6 +915,7 @@ async function processImage(imagePath, options = {}) {
       logger.info(`[BorderDetector] Image loaded: ${imageMeta.format || ''}`);
       // Detect borders
       const borderData = await detectBorders(imageBuffer, { threshold });
+      const outputFormat = options.outputFormat || 'original';
       if (!borderData.hasBorders) {
         logger.info(`[BorderDetector] No significant borders detected: ${imagePath}`);
         
@@ -831,17 +924,27 @@ async function processImage(imagePath, options = {}) {
         if (outputPath) {
           finalOutputPath = outputPath;
         } else if (isPdf) {
-          // Save as PNG with _page1_processed.png suffix (not cropped)
           const base = path.basename(imagePath, path.extname(imagePath));
           const dir = path.dirname(imagePath);
           const date = new Date().toISOString().split('T')[0];
-          finalOutputPath = path.join(dir, `${date}_processed`, `${base}_page1_processed.png`);
+          if (outputFormat === 'pdf') {
+            // Copy original PDF if user requested PDF output
+            finalOutputPath = path.join(dir, `${date}_processed`, `${base}_page1_processed.pdf`);
+          } else {
+            // Save as PNG for other formats or original
+            finalOutputPath = path.join(dir, `${date}_processed`, `${base}_page1_processed.png`);
+          }
         } else {
-          finalOutputPath = generateOutputPath(imagePath, { suffix: '_processed' });
+          finalOutputPath = generateOutputPath(imagePath, { suffix: '_processed', outputFormat });
         }
         
         await ensureOutputDirectory(finalOutputPath);
-        await fs.writeFile(finalOutputPath, imageBuffer);
+        if (isPdf && outputFormat === 'pdf') {
+          // Copy the PDF file
+          await fs.copyFile(imagePath, finalOutputPath);
+        } else {
+          await fs.writeFile(finalOutputPath, imageBuffer);
+        }
         logger.info(`[BorderDetector] Saved original image (no borders found): ${finalOutputPath}`);
     
     return {
@@ -860,25 +963,76 @@ async function processImage(imagePath, options = {}) {
       const shouldRotateForPdf = false; // Disable automatic rotation to preserve orientation
       const croppedBuffer = await cropImage(imageBuffer, borderData, { 
         rotateFinalOutput: shouldRotateForPdf,
-        preserveOrientation: true // Always preserve original orientation
+        preserveOrientation: true, // Always preserve original orientation
+        outputFormat: options.outputFormat
       });
       // Generate output path
       let finalOutputPath;
       if (outputPath) {
         finalOutputPath = outputPath;
       } else if (isPdf) {
-        // Save as PNG with _page1_cropped.png suffix
         const base = path.basename(imagePath, path.extname(imagePath));
         const dir = path.dirname(imagePath);
         const date = new Date().toISOString().split('T')[0];
-        finalOutputPath = path.join(dir, `${date}_processed`, `${base}_page1_cropped.png`);
+        
+        // Determine file extension based on outputFormat, defaulting to png
+        let extension = `.${options.outputFormat || 'png'}`;
+        if (options.outputFormat === 'original' || options.outputFormat === 'pdf') {
+            extension = '.pdf';
+        } else if (options.outputFormat === 'jpg') {
+            extension = '.jpeg';
+        }
+
+        finalOutputPath = path.join(dir, `${date}_processed`, `${base}_page1_cropped${extension}`);
       } else {
-        finalOutputPath = generateOutputPath(imagePath);
+        finalOutputPath = generateOutputPath(imagePath, { outputFormat: options.outputFormat });
       }
       await ensureOutputDirectory(finalOutputPath);
-      await fs.writeFile(finalOutputPath, croppedBuffer);
+      // Handle PDF or SVG output by embedding the image
+      let outputBuffer = croppedBuffer;
+      let actualOutputFormat = options.outputFormat || 'original';
+
+      if (actualOutputFormat === 'pdf') {
+        try {
+          logger.info('[BorderDetector] Creating PDF output from cropped image using Sharp compositing');
+          
+          const { width, height } = borderData;
+          
+          // Create a blank PDF-compatible background using Sharp
+          const pdfPageBuffer = await sharp({
+            create: {
+              width: width,
+              height: height,
+              channels: 4,
+              background: { r: 255, g: 255, b: 255, alpha: 1 }
+            }
+          })
+          .toFormat('pdf')
+          .toBuffer();
+
+          // Composite the cropped image onto the blank PDF page
+          outputBuffer = await sharp(pdfPageBuffer)
+            .composite([{ input: croppedBuffer, top: 0, left: 0 }])
+            .toBuffer();
+
+          logger.info(`[BorderDetector] PDF created successfully using Sharp, size: ${(outputBuffer.length / 1024).toFixed(1)}KB`);
+
+        } catch (pdfError) {
+          logger.error(`[BorderDetector] PDF generation with Sharp failed: ${pdfError.message}, falling back to PNG`);
+          outputBuffer = croppedBuffer;
+          finalOutputPath = finalOutputPath.replace(/\.pdf$/, '.png');
+          actualOutputFormat = 'png';
+          logger.info(`[BorderDetector] Fallback: Saving as PNG instead: ${finalOutputPath}`);
+        }
+      } else if (options.outputFormat === 'svg') {
+        // Wrap cropped PNG in an SVG <image> element
+        const svgContent = `<?xml version="1.0" encoding="UTF-8"?>\n<svg xmlns="http://www.w3.org/2000/svg" width="${borderData.width}" height="${borderData.height}">\n  <image href=\"data:image/png;base64,${croppedBuffer.toString('base64')}\" width=\"${borderData.width}\" height=\"${borderData.height}\"/>\n</svg>`;
+        outputBuffer = Buffer.from(svgContent, 'utf8');
+      }
+      await fs.writeFile(finalOutputPath, outputBuffer);
       const processingTime = Date.now() - startTime;
-      logger.info(`[BorderDetector] Successfully processed ${imagePath} in ${processingTime}ms`);
+      logger.info(`[BorderDetector] Successfully processed ${imagePath} in ${processingTime}ms - Final output: ${finalOutputPath} (${actualOutputFormat} format)`);
+      logger.info(`[DEBUG-${callId}] processImage completed for ${path.basename(imagePath)}`);
       return {
         success: true,
         originalPath: imagePath,
@@ -890,7 +1044,7 @@ async function processImage(imagePath, options = {}) {
         processingTime,
         fileSize: {
           original: imageBuffer.length,
-          processed: croppedBuffer.length
+          processed: outputBuffer.length
         },
         isPdf
       };
@@ -933,7 +1087,15 @@ async function processBatch(imagePaths, options = {}, progressCallback = null) {
     signal // AbortSignal from AbortController
   } = options;
   
-  logger.info(`[BorderDetector] Starting batch processing of ${imagePaths.length} images`);
+  // DEBUG: Add unique batch call tracking
+  const batchId = `processBatch_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+  logger.info(`[DEBUG-${batchId}] processBatch called with ${imagePaths.length} files, outputFormat: ${options.outputFormat}`);
+  
+  logger.info(`[BorderDetector] Starting batch processing of ${imagePaths.length} images with options:`, {
+    outputFormat: options.outputFormat,
+    maxConcurrent,
+    totalFiles: imagePaths.length
+  });
   
   // Validate batch size
   if (imagePaths.length > 500) {
@@ -1056,109 +1218,6 @@ async function processBatch(imagePaths, options = {}, progressCallback = null) {
   };
 }
 
-/**
- * Analyzes image content to determine if it needs rotation
- * @param {Buffer} imageBuffer - The image buffer  
- * @returns {Promise<number>} - Rotation angle (0, 90, 180, 270)
- */
-async function detectContentOrientation(imageBuffer) {
-  try {
-    const { data, info } = await sharp(imageBuffer)
-      .grayscale()
-      .raw()
-      .toBuffer({ resolveWithObject: true });
-    
-    const { width, height } = info;
-    
-    // Analyze text/content orientation by looking for text-like patterns
-    // Text lines are typically horizontal, so we look for horizontal vs vertical line patterns
-    
-    let horizontalLines = 0;
-    let verticalLines = 0;
-    
-    // Sample rows and columns to detect text orientation
-    const sampleInterval = Math.max(1, Math.floor(Math.min(width, height) / 20));
-    
-    // Count horizontal line-like patterns (text lines)
-    for (let y = 10; y < height - 10; y += sampleInterval) {
-      let lineVariation = 0;
-      let lineLength = 0;
-      
-      for (let x = 1; x < width - 1; x++) {
-        const current = data[y * width + x];
-        const prev = data[y * width + (x - 1)];
-        const variation = Math.abs(current - prev);
-        
-        if (variation > 20) { // Text edge detected
-          lineLength++;
-        }
-      }
-      
-      if (lineLength > width * 0.3) { // Substantial horizontal content
-        horizontalLines++;
-      }
-    }
-    
-    // Count vertical line-like patterns
-    for (let x = 10; x < width - 10; x += sampleInterval) {
-      let lineVariation = 0;
-      let lineLength = 0;
-      
-      for (let y = 1; y < height - 1; y++) {
-        const current = data[y * width + x];
-        const prev = data[(y - 1) * width + x];
-        const variation = Math.abs(current - prev);
-        
-        if (variation > 20) { // Text edge detected
-          lineLength++;
-        }
-      }
-      
-      if (lineLength > height * 0.3) { // Substantial vertical content
-        verticalLines++;
-      }
-    }
-    
-    logger.info(`[ContentOrientation] Analysis: ${horizontalLines} horizontal patterns, ${verticalLines} vertical patterns`);
-    
-    // Enhanced decision logic for document rotation
-    const isCurrentlyLandscape = width > height;
-    const aspectRatio = width / height;
-    
-    // For landscape images with aspect ratio suggesting portrait content
-    if (isCurrentlyLandscape && aspectRatio < 2.0) {
-      // Check if this looks like a scanned document that should be portrait
-      // Most documents are portrait (8.5x11, A4, etc.)
-      const totalTextPatterns = horizontalLines + verticalLines;
-      
-      // If we found significant text patterns and it's currently landscape but not extremely wide
-      if (totalTextPatterns > 0 && aspectRatio < 1.8) {
-        logger.info(`[ContentOrientation] Landscape document with moderate aspect ratio (${aspectRatio.toFixed(2)}) - likely needs rotation to portrait`);
-        return 90;
-      }
-      
-      // Also check if vertical patterns are stronger (suggesting rotated text)
-      if (verticalLines > horizontalLines) {
-        logger.info(`[ContentOrientation] More vertical than horizontal patterns in landscape image - recommending 90° rotation`);
-        return 90;
-      }
-    }
-    
-    // For portrait images that might need landscape
-    if (!isCurrentlyLandscape && horizontalLines > verticalLines * 2) {
-      logger.info(`[ContentOrientation] Strong horizontal patterns in portrait image - recommending -90° rotation`);
-      return -90;
-    }
-    
-    logger.info(`[ContentOrientation] Content orientation appears correct - no rotation needed (aspect: ${aspectRatio.toFixed(2)})`);
-    return 0;
-    
-  } catch (error) {
-    logger.error(`[ContentOrientation] Analysis failed: ${error.message}`);
-    return 0; // Default to no rotation on error
-  }
-}
-
 // Export the enhanced border detection module
 module.exports = { 
   detectBorders,
@@ -1168,4 +1227,4 @@ module.exports = {
   generateOutputPath,
   validateFile,
   CONFIG
-}; 
+};

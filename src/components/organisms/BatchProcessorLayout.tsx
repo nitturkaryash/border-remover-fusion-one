@@ -1,9 +1,10 @@
-import React, { useState, useEffect } from 'react';
-import { cn, createOutputFolderName } from '@/lib/utils';
+import React, { useState, useEffect, useCallback } from 'react';
+import { cn, buildFileMetaList } from '@/lib/utils';
 import { useAppStore, FileMeta } from '@/store/appStore';
 import { FileList } from '@/components/molecules/FileList';
 import { ProcessingControls } from '@/components/molecules/ProcessingControls';
 import { DropZone } from '@/components/molecules/DropZone';
+import { OutputFormatSelector } from '@/components/molecules/OutputFormatSelector';
 import { Button } from '@/components/ui/button';
 import { CheckCircle, FolderOpen, XCircle } from 'lucide-react';
 import { useToast } from '@/hooks/use-toast';
@@ -25,6 +26,7 @@ export const BatchProcessorLayout: React.FC<BatchProcessorLayoutProps> = ({
     progress,
     isProcessing,
     errors,
+    outputFormat,
     setFiles,
     clearFiles,
     setProgress,
@@ -32,12 +34,19 @@ export const BatchProcessorLayout: React.FC<BatchProcessorLayoutProps> = ({
     stopProcessing,
     addError,
     clearErrors,
+    setOutputFormat,
   } = useAppStore();
   const [currentProcessingFile, setCurrentProcessingFile] = useState<string | undefined>();
   const [isComplete, setIsComplete] = useState(false);
   const [dropZoneError, setDropZoneError] = useState<Error | null>(null);
   const { toast } = useToast();
   const [outputFolder, setOutputFolder] = useState<string | null>(null);
+  const [processingSummary, setProcessingSummary] = useState<{
+    total: number;
+    successful: number;
+    failed: number;
+    cropped: number;
+  } | null>(null);
 
   useEffect(() => {
     console.log('BatchProcessorLayout mounted, window.electronAPI:', !!window.electronAPI);
@@ -63,13 +72,23 @@ export const BatchProcessorLayout: React.FC<BatchProcessorLayoutProps> = ({
           setIsComplete(true);
           result.errors.forEach(err => addError(err)); 
 
+          const croppedCount = result.summary?.cropped ?? result.processedFiles.filter(f => (f as any).cropped).length;
+          const totalCount = result.summary?.total ?? (result.processedFiles.length + result.errors.length);
+          const successfulCount = result.summary?.successful ?? result.processedFiles.length;
+          const failedCount = result.summary?.failed ?? result.errors.length;
+          setProcessingSummary({
+            total: totalCount,
+            successful: successfulCount,
+            failed: failedCount,
+            cropped: croppedCount,
+          });
+
           // Calculate statistics for better user feedback
-          const croppedCount = result.processedFiles.filter(f => (f as any).cropped).length;
-          const processedCount = result.processedFiles.filter(f => !(f as any).cropped).length;
+          const processedCount = successfulCount - croppedCount;
           
-          const notificationBody = result.errors.length === 0 
-            ? `${result.processedFiles.length} files processed successfully. ${croppedCount} cropped, ${processedCount} had no borders.`
-            : `${result.processedFiles.length} of ${files.length} files processed. ${result.errors.length} error(s).`;
+          const notificationBody = failedCount === 0 
+            ? `${successfulCount} files processed successfully. ${croppedCount} cropped, ${processedCount} had no borders.`
+            : `${successfulCount} of ${totalCount} files processed. ${failedCount} error(s).`;
 
           window.electronAPI?.showNotification?.({
             title: 'Processing Complete',
@@ -92,17 +111,74 @@ export const BatchProcessorLayout: React.FC<BatchProcessorLayoutProps> = ({
     };
   }, [files.length]);
 
-  const handleSelectFiles = async () => {
-    if (!window.electronAPI) {
-      toast({ title: 'Error', description: 'File selection API not available.', variant: 'destructive' });
-      return;
+  const isElectronAvailable = typeof window !== 'undefined' && !!window.electronAPI;
+
+  const promptBrowserForFiles = useCallback(async (): Promise<FileMeta[]> => {
+    return new Promise<FileMeta[]>((resolve, reject) => {
+      const input = document.createElement('input');
+      input.type = 'file';
+      input.multiple = true;
+      input.accept = 'image/jpeg,image/png,image/tiff,application/pdf';
+
+      const cleanup = () => {
+        input.onchange = null;
+      };
+
+      input.onchange = async (event) => {
+        try {
+          const target = event.target as HTMLInputElement;
+          const filesList = target.files;
+          if (!filesList || filesList.length === 0) {
+            cleanup();
+            resolve([]);
+            return;
+          }
+
+          const { files: fileMetas, unsupportedCount } = await buildFileMetaList(filesList);
+
+          if (unsupportedCount > 0) {
+            toast({
+              title: `${unsupportedCount} unsupported file(s) skipped`,
+              description: 'Only JPG, PNG, TIFF and PDF files are supported',
+              variant: 'default',
+            });
+          }
+
+          cleanup();
+          resolve(fileMetas);
+        } catch (err) {
+          cleanup();
+          reject(err);
+        }
+      };
+
+      input.click();
+    });
+  }, [toast]);
+
+  const filesAreDuplicates = useCallback((existing: FileMeta, incoming: FileMeta) => {
+    if (existing.path && incoming.path) {
+      return existing.path === incoming.path;
     }
+
+    return (
+      existing.name === incoming.name &&
+      existing.size === incoming.size &&
+      existing.lastModified === incoming.lastModified
+    );
+  }, []);
+
+  const handleSelectFiles = async () => {
     try {
-      const selectedFiles = await window.electronAPI.selectFiles();
+      const selectedFiles = isElectronAvailable
+        ? await window.electronAPI.selectFiles()
+        : await promptBrowserForFiles();
+
       if (selectedFiles && selectedFiles.length > 0) {
         setFiles(selectedFiles);
-        setIsComplete(false); 
-        clearErrors(); 
+        setIsComplete(false);
+        clearErrors();
+        setProcessingSummary(null);
       }
     } catch (error) {
       console.error('Error selecting files:', error);
@@ -111,19 +187,25 @@ export const BatchProcessorLayout: React.FC<BatchProcessorLayoutProps> = ({
   };
 
   const handleAddMoreFiles = async () => {
-    if (!window.electronAPI) {
-      toast({ title: 'Error', description: 'File selection API not available.', variant: 'destructive' });
-      return;
-    }
     try {
-      const selectedFiles = await window.electronAPI.selectFiles();
+      const selectedFiles = isElectronAvailable
+        ? await window.electronAPI.selectFiles()
+        : await promptBrowserForFiles();
+
       if (selectedFiles && selectedFiles.length > 0) {
-        const newFiles = selectedFiles.filter(sf => !files.find(f => f.path === sf.path));
+        const newFiles = selectedFiles.filter((candidate) =>
+          !files.some((existing) => filesAreDuplicates(existing, candidate))
+        );
+
         if (newFiles.length > 0) {
           setFiles([...files, ...newFiles]);
         }
+
         if (newFiles.length < selectedFiles.length) {
-          toast({ title: 'Some files already selected', description: 'Duplicate files were not added.', variant: 'default'});
+          toast({ title: 'Some files already selected', description: 'Duplicate files were not added.', variant: 'default' });
+        }
+        if (newFiles.length > 0) {
+          setProcessingSummary(null);
         }
       }
     } catch (error) {
@@ -145,14 +227,23 @@ export const BatchProcessorLayout: React.FC<BatchProcessorLayoutProps> = ({
         toast({ title: 'Error', description: 'Processing API not available.', variant: 'destructive' });
         return;
     }
+    if (files.some(file => !file.path)) {
+      toast({
+        title: 'Missing file locations',
+        description: 'At least one selected file does not include an absolute path. Please use the "Select Images" button in the desktop app.',
+        variant: 'destructive',
+      });
+      return;
+    }
 
     startProcessing();
     setIsComplete(false);
     clearErrors();
     setCurrentProcessingFile(files[0]?.name);
+    setProcessingSummary(null);
 
     try {
-      const result = await window.electronAPI.startImageProcessing(files);
+      const result = await window.electronAPI.startImageProcessing(files, { outputFormat });
       if (!result.success) {
         toast({ title: 'Failed to start processing', description: result.message, variant: 'destructive' });
         stopProcessing();
@@ -184,6 +275,16 @@ export const BatchProcessorLayout: React.FC<BatchProcessorLayoutProps> = ({
     setCurrentProcessingFile(undefined);
   };
 
+  const handleDropZoneSelection = useCallback((incomingFiles: FileMeta[]) => {
+    if (incomingFiles.length === 0) {
+      return;
+    }
+    setFiles(incomingFiles);
+    setIsComplete(false);
+    clearErrors();
+    setProcessingSummary(null);
+  }, [clearErrors, setFiles]);
+
   return (
     <div className={cn('w-full max-w-4xl mx-auto p-6 space-y-8', className)}>
       <div className="text-center">
@@ -203,15 +304,15 @@ export const BatchProcessorLayout: React.FC<BatchProcessorLayoutProps> = ({
         ) : isComplete ? (
           <div className="text-center py-8 space-y-6">
             <div className="flex flex-col items-center justify-center">
-              {errors.length === 0 ? 
+              {(processingSummary?.failed ?? errors.length) === 0 ? 
                 <CheckCircle className="h-16 w-16 text-primary mb-4" /> :
                 <XCircle className="h-16 w-16 text-destructive mb-4" />
               }
               <h2 className="text-xl font-medium">Processing Complete!</h2>
               <p className="text-muted-foreground mt-2">
-                {errors.length === 0 
+                {(processingSummary?.failed ?? errors.length) === 0 
                   ? 'All files have been successfully processed and saved to the output folder' 
-                  : `${files.length - errors.length} of ${files.length} files processed. ${errors.length} error(s).`}
+                  : `${processingSummary?.successful ?? Math.max(files.length - errors.length, 0)} of ${processingSummary?.total ?? files.length} files processed. ${(processingSummary?.failed ?? errors.length)} error(s).`}
               </p>
             </div>
             <div className="flex gap-4 justify-center">
@@ -259,7 +360,7 @@ export const BatchProcessorLayout: React.FC<BatchProcessorLayoutProps> = ({
                   ) : (
                     <React.Suspense fallback={<div>Loading...</div>}>
                       <ErrorBoundary onError={setDropZoneError}>
-                        <DropZone onFilesSelected={setFiles} onButtonClick={handleSelectFiles} />
+                        <DropZone onFilesSelected={handleDropZoneSelection} onButtonClick={handleSelectFiles} />
                       </ErrorBoundary>
                     </React.Suspense>
                   )}
@@ -281,10 +382,19 @@ export const BatchProcessorLayout: React.FC<BatchProcessorLayoutProps> = ({
               )}
             </div>
             {files.length > 0 && (
-              <div className="flex justify-center pt-4">
-                <Button size="lg" onClick={handleProcessFiles} disabled={isProcessing}>
-                  Process Images ({files.length})
-                </Button>
+              <div className="space-y-6">
+                <div className="max-w-xs mx-auto">
+                  <OutputFormatSelector
+                    value={outputFormat}
+                    onValueChange={setOutputFormat}
+                    disabled={isProcessing}
+                  />
+                </div>
+                <div className="flex justify-center">
+                  <Button size="lg" onClick={handleProcessFiles} disabled={isProcessing}>
+                    Process Images ({files.length})
+                  </Button>
+                </div>
               </div>
             )}
           </div>

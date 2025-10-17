@@ -19,6 +19,15 @@ export interface ImageProcessingCompletionResult {
   message: string;
   processedFiles: FileMeta[]; // Files that were successfully processed (might include new paths)
   errors: ImageProcessingError[];
+  summary?: {
+    total: number;
+    successful: number;
+    failed: number;
+    cropped: number;
+    processingTime?: number;
+    averageTime?: number;
+    memoryUsage?: unknown;
+  };
 }
 
 declare global {
@@ -31,7 +40,7 @@ declare global {
       onSelectFilesRequest: (callback: () => void) => (() => void) | void; // Can optionally return a cleanup
       
       // Image Processing IPC
-      startImageProcessing: (files: FileMeta[]) => Promise<{success: boolean, message: string}>;
+      startImageProcessing: (files: FileMeta[], options?: { outputFormat?: string }) => Promise<{success: boolean, message: string}>;
       cancelImageProcessing: () => Promise<{success: boolean, message: string}>;
       onImageProcessingProgress: (callback: (progressUpdate: ImageProcessingProgressUpdate) => void) => (() => void) | void;
       onImageProcessingComplete: (callback: (result: ImageProcessingCompletionResult) => void) => (() => void) | void;
