@@ -1,10 +1,51 @@
-const { app, BrowserWindow, dialog, ipcMain, shell, Menu, Notification } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
 const http = require('http');
-const { addToQueue, processQueue, getQueueStatus, cancelProcessing, clearQueue, validateQueue } = require('./processors/ImageBatch');
-const logger = require('./utils/logger'); // Import logger
+const logger = require('./utils/logger');
+
+logger.info('[Main] ========================================');
+logger.info('[Main] Black Border Remover Initializing');
+logger.info('[Main] ========================================');
+
+// Dynamic require to handle Electron loading issues
+let electronModule;
+try {
+  electronModule = require('electron');
+
+  if (typeof electronModule === 'string') {
+    logger.warn('[Main] ⚠️ Got Electron binary path instead of API');
+    logger.warn('[Main] Attempting to load using fallback methods...');
+
+    try {
+      delete require.cache[require.resolve('electron')];
+      electronModule = process.binding('electron');
+
+      if (!electronModule || !electronModule.app) {
+        throw new Error('Native binding failed');
+      }
+      logger.info('[Main] ✅ Loaded Electron via native binding');
+    } catch (nativeError) {
+      logger.error('[Main] ❌ Native binding failed');
+      throw new Error('Could not load Electron API');
+    }
+  }
+
+  if (!electronModule.app) {
+    throw new Error('Electron module does not have app property');
+  }
+} catch (error) {
+  logger.error('[Main] ❌ FATAL: Could not load Electron:', error.message);
+  process.exit(1);
+}
+
+const { app, BrowserWindow, dialog, ipcMain, shell, Menu, Notification } = electronModule;
+
+logger.info('[Main] ✅ Electron module loaded');
+logger.info('[Main] Electron version:', process.versions.electron);
+logger.info('[Main] Node version:', process.versions.node);
+
+let imageBatchModule = null;
 
 // Handle creating/removing shortcuts on Windows when installing/uninstalling
 if (require('electron-squirrel-startup')) {
@@ -15,10 +56,12 @@ let mainWindow;
 
 // Function to detect Vite dev server port
 async function detectViteDevServerPort() {
-  // Try ports starting from 5173 (Vite default)
+  // Try ports starting from 9000 (our configured port), then fallback to 5173
   logger.info('[Electron] Starting Vite dev server detection...');
-  
-  for (let port = 5173; port < 5200; port++) {
+
+  const portsToTry = [9000, 5173, 5174, 5175, 5176]; // Try configured port first
+
+  for (const port of portsToTry) {
     logger.info(`[Electron] Checking port ${port}...`);
     try {
       const available = await new Promise((resolve) => {
@@ -27,21 +70,21 @@ async function detectViteDevServerPort() {
           resolve(res.statusCode === 200);
           req.destroy();
         });
-        
+
         req.on('error', (err) => {
           logger.info(`[Electron] Port ${port} error: ${err.message}`);
           resolve(false);
         });
-        
-        req.setTimeout(300, () => {
+
+        req.setTimeout(500, () => {
           logger.info(`[Electron] Port ${port} timeout`);
           req.destroy();
           resolve(false);
         });
       });
-      
+
       if (available) {
-        logger.info(`[Electron] Detected Vite dev server running on port ${port}`);
+        logger.info(`[Electron] ✅ Detected Vite dev server running on port ${port}`);
         return port;
       }
     } catch (err) {
@@ -49,12 +92,25 @@ async function detectViteDevServerPort() {
       // continue to next port
     }
   }
-  
-  logger.warn('[Electron] Could not detect Vite dev server port, falling back to default 5173');
-  return 5173; // Fallback to default Vite port
+
+  logger.error('[Electron] ❌ Could not detect Vite dev server on any port! Please ensure Vite is running.');
+  logger.error('[Electron] Expected ports: 9000 (configured) or 5173 (Vite default)');
+  logger.error('[Electron] Falling back to port 9000, but the app may not load correctly.');
+  return 9000; // Fallback to configured port
 }
 
 async function createWindow() {
+  logger.info('[Electron] Creating browser window...');
+
+  // Verify preload script exists
+  const preloadPath = path.join(__dirname, 'preload.js');
+  if (!fs.existsSync(preloadPath)) {
+    logger.error(`[Electron] ❌ Preload script not found at: ${preloadPath}`);
+    logger.error('[Electron] This will cause window.electronAPI to be undefined!');
+  } else {
+    logger.info(`[Electron] ✅ Preload script found at: ${preloadPath}`);
+  }
+
   // Create the browser window
   mainWindow = new BrowserWindow({
     width: 1000,
@@ -62,16 +118,25 @@ async function createWindow() {
     minWidth: 800,
     minHeight: 600,
     webPreferences: {
-      preload: path.join(__dirname, 'preload.js'),
+      preload: preloadPath,
       contextIsolation: true,
       nodeIntegration: false,
     },
   });
 
+  // Log when preload script completes
+  mainWindow.webContents.on('did-finish-load', () => {
+    logger.info('[Electron] ✅ Page finished loading');
+  });
+
+  mainWindow.webContents.on('did-fail-load', (event, errorCode, errorDescription) => {
+    logger.error(`[Electron] ❌ Failed to load page: ${errorCode} - ${errorDescription}`);
+  });
+
   // For testing purposes, load the local HTML file first
   // When debugged, you can switch back to the normal behavior
   const testMode = false; // Set to false to use normal Vite dev server or production build
-  
+
   let startUrl;
   if (testMode) {
     startUrl = `file://${path.join(__dirname, 'test.html')}`;
@@ -93,15 +158,23 @@ async function createWindow() {
   }
 
   try {
-    logger.info('[Electron] Loading URL:', startUrl);
+    logger.info(`[Electron] 🔄 Loading URL: ${startUrl}`);
     await mainWindow.loadURL(startUrl);
-    logger.info('[Electron] URL loaded successfully');
+    logger.info('[Electron] ✅ URL loaded successfully');
   } catch (error) {
-    logger.error('[Electron] Failed to load URL:', error);
+    logger.error('[Electron] ❌ Failed to load URL:', error.message);
+    logger.error('[Electron] Stack:', error.stack);
+
+    // Show error dialog to user
+    dialog.showErrorBox(
+      'Failed to Load Application',
+      `Could not load ${startUrl}\n\nError: ${error.message}\n\nPlease ensure the Vite dev server is running on port 9000.`
+    );
   }
 
   // Open DevTools in development mode
   if (process.env.NODE_ENV === 'development') {
+    logger.info('[Electron] Opening DevTools...');
     mainWindow.webContents.openDevTools();
   }
 
@@ -160,6 +233,16 @@ async function createWindow() {
 
 // This method will be called when Electron has finished initialization
 app.whenReady().then(async () => {
+  logger.info('[Main] ✅ Electron app ready event fired');
+
+  // Load ImageBatch module after app is ready (lazy-loading)
+  try {
+    imageBatchModule = require('./processors/ImageBatch');
+    logger.info('[Main] ✅ ImageBatch module loaded');
+  } catch (error) {
+    logger.error('[Main] ❌ Failed to load ImageBatch:', error.message);
+  }
+
   await createWindow();
 
   app.on('activate', async () => {
@@ -244,19 +327,21 @@ ipcMain.handle('show-notification', (event, { title, body }) => {
 
 // Handle starting image processing
 ipcMain.handle('start-image-processing', async (event, filesToProcess, options = {}) => {
-  logger.info(`[IPC] Received request to process ${filesToProcess.length} files with options:`, JSON.stringify(options, null, 2));
-  logger.info(`[IPC] Output format specifically:`, options.outputFormat);
+  logger.info(`[IPC] Received request to process ${filesToProcess.length} files`);
+
+  if (!imageBatchModule) {
+    logger.error('[IPC] ImageBatch module not loaded');
+    return { success: false, message: 'Image processor not initialized' };
+  }
+
+  const { addToQueue, processQueue } = imageBatchModule;
   addToQueue(filesToProcess);
-  
-  // Define how progress and completion are sent back to renderer
+
   const progressCallback = (progressUpdate) => {
-    logger.info(`[IPC] Sending progress update: ${progressUpdate.done}/${progressUpdate.total} - ${progressUpdate.currentFile}`);
     mainWindow.webContents.send('image-processing-progress', progressUpdate);
   };
-  
+
   const completionCallback = (result) => {
-    logger.info(`[IPC] Sending processing completion: ${result.processedFiles.length} processed, ${result.errors.length} errors.`);
-    // Determine output folder from first processed file
     let outputDir = null;
     if (result.processedFiles && result.processedFiles.length > 0) {
       const firstPath = result.processedFiles[0].processedPath;
@@ -265,10 +350,8 @@ ipcMain.handle('start-image-processing', async (event, filesToProcess, options =
     mainWindow.webContents.send('image-processing-complete', { ...result, outputDir });
   };
 
-  // Start processing the queue with options (don't wait for it here, it runs in background)
   processQueue(progressCallback, completionCallback, options)
-    .then(() => logger.info('[IPC] processQueue promise resolved (indicates queue processing loop started or finished if empty).'))
-    .catch(err => logger.error('[IPC] Error in processQueue execution chain:', err));
+    .catch(err => logger.error('[IPC] processQueue error:', err));
 
   return { success: true, message: 'Processing started.' };
 });
@@ -276,13 +359,17 @@ ipcMain.handle('start-image-processing', async (event, filesToProcess, options =
 // Handle cancelling image processing
 ipcMain.handle('cancel-image-processing', async () => {
   logger.info('[IPC] Received request to cancel processing.');
-  const result = cancelProcessing();
-  
+
+  if (!imageBatchModule) {
+    return { success: false, message: 'Image processor not loaded' };
+  }
+
+  const result = imageBatchModule.cancelProcessing();
+
   if (result.success) {
-    // Notify renderer of successful cancellation
     mainWindow.webContents.send('image-processing-cancelled', result);
   }
-  
+
   return result;
 });
 

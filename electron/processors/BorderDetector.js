@@ -5,6 +5,9 @@
 const sharp = require('sharp');
 const path = require('path');
 const fs = require('fs').promises;
+const os = require('os');
+const PdfKitDocument = require('pdfkit');
+const { PDFDocument: PdfLibDocument } = require('pdf-lib');
 const logger = require('../utils/logger');
 const pdf2pic = require('pdf2pic');
 
@@ -31,6 +34,15 @@ const CONFIG = {
 
 // Add PDF to supported formats
 CONFIG.SUPPORTED_FORMATS.push('pdf');
+
+const DEFAULT_OUTPUT_ROOT = path.join(os.homedir(), 'BlackBorderRemover', 'processed');
+
+function getRunOutputDirectory(runTimestamp = new Date()) {
+  const iso = runTimestamp.toISOString().replace(/[:.]/g, '-').replace('Z', '');
+  const [datePart, timePart] = iso.split('T');
+  const folderName = timePart ? `${datePart}_${timePart}` : datePart;
+  return path.join(DEFAULT_OUTPUT_ROOT, folderName);
+}
 
 /**
  * Advanced border detection using multi-pass algorithm
@@ -599,10 +611,11 @@ function generateOutputPath(originalPath, options = {}) {
   const { 
     outputDir = null,
     preserveStructure = false,
-    addTimestamp = true,
     suffix = '_cropped',
     outputFormat = 'original'
   } = options;
+  
+  const addTimestamp = options.addTimestamp ?? (outputDir ? false : true);
   
   const dir = outputDir || path.dirname(originalPath);
   const originalExt = path.extname(originalPath);
@@ -682,9 +695,9 @@ async function convertPdfToImageBuffer(pdfPath) {
     // Force a portrait orientation to maintain the document's original orientation
     // This is critical for proper document viewing - MAXIMUM QUALITY SETTINGS
     const converter = pdf2pic.fromPath(pdfPath, {
-      density: 600, // Maximum DPI for best quality (doubled from 300)
+      density: 300, // Balanced DPI to keep size reasonable while maintaining clarity
       format: "png",
-      quality: 100, // Maximum quality
+      quality: 90,
       // savePath: "./temp_pdf_conversion", // Temporary path, not used for base64
       // saveFilename: "temp_pdf_page",
       // Critical: Force preservation of PDF orientation as it appears in viewer
@@ -851,6 +864,8 @@ async function processImage(imagePath, options = {}) {
     timeout = CONFIG.TIMEOUT_MS,
     signal // AbortSignal
   } = options;
+  const runTimestamp = options.runTimestamp instanceof Date ? options.runTimestamp : new Date();
+  const runDate = runTimestamp.toISOString().split('T')[0];
 
   const ext = path.extname(imagePath).toLowerCase().slice(1);
   const isPdf = ext === 'pdf';
@@ -921,21 +936,19 @@ async function processImage(imagePath, options = {}) {
         
         // Still save the original image to output folder for user reference
         let finalOutputPath;
+        const defaultPdfDir = path.join(path.dirname(imagePath), `${runDate}_processed`);
+        const baseOutputDir = options.outputDir || defaultPdfDir;
         if (outputPath) {
           finalOutputPath = outputPath;
         } else if (isPdf) {
           const base = path.basename(imagePath, path.extname(imagePath));
-          const dir = path.dirname(imagePath);
-          const date = new Date().toISOString().split('T')[0];
           if (outputFormat === 'pdf') {
-            // Copy original PDF if user requested PDF output
-            finalOutputPath = path.join(dir, `${date}_processed`, `${base}_page1_processed.pdf`);
+            finalOutputPath = path.join(baseOutputDir, `${base}_page1_processed.pdf`);
           } else {
-            // Save as PNG for other formats or original
-            finalOutputPath = path.join(dir, `${date}_processed`, `${base}_page1_processed.png`);
+            finalOutputPath = path.join(baseOutputDir, `${base}_page1_processed.png`);
           }
         } else {
-          finalOutputPath = generateOutputPath(imagePath, { suffix: '_processed', outputFormat });
+          finalOutputPath = generateOutputPath(imagePath, { suffix: '_processed', outputFormat, outputDir: baseOutputDir, addTimestamp: false });
         }
         
         await ensureOutputDirectory(finalOutputPath);
@@ -968,68 +981,61 @@ async function processImage(imagePath, options = {}) {
       });
       // Generate output path
       let finalOutputPath;
+      const baseOutputDir = options.outputDir || path.join(path.dirname(imagePath), `${runDate}_processed`);
       if (outputPath) {
         finalOutputPath = outputPath;
       } else if (isPdf) {
         const base = path.basename(imagePath, path.extname(imagePath));
-        const dir = path.dirname(imagePath);
-        const date = new Date().toISOString().split('T')[0];
         
         // Determine file extension based on outputFormat, defaulting to png
         let extension = `.${options.outputFormat || 'png'}`;
         if (options.outputFormat === 'original' || options.outputFormat === 'pdf') {
-            extension = '.pdf';
+          extension = '.pdf';
         } else if (options.outputFormat === 'jpg') {
-            extension = '.jpeg';
+          extension = '.jpeg';
         }
 
-        finalOutputPath = path.join(dir, `${date}_processed`, `${base}_page1_cropped${extension}`);
+        finalOutputPath = path.join(baseOutputDir, `${base}_page1_cropped${extension}`);
       } else {
-        finalOutputPath = generateOutputPath(imagePath, { outputFormat: options.outputFormat });
+        finalOutputPath = generateOutputPath(imagePath, { outputFormat: options.outputFormat, outputDir: baseOutputDir, addTimestamp: false });
       }
       await ensureOutputDirectory(finalOutputPath);
-      // Handle PDF or SVG output by embedding the image
       let outputBuffer = croppedBuffer;
       let actualOutputFormat = options.outputFormat || 'original';
+      let wroteFileDirectly = false;
+      let processedSize = null;
 
       if (actualOutputFormat === 'pdf') {
         try {
-          logger.info('[BorderDetector] Creating PDF output from cropped image using Sharp compositing');
-          
-          const { width, height } = borderData;
-          
-          // Create a blank PDF-compatible background using Sharp
-          const pdfPageBuffer = await sharp({
-            create: {
-              width: width,
-              height: height,
-              channels: 4,
-              background: { r: 255, g: 255, b: 255, alpha: 1 }
-            }
-          })
-          .toFormat('pdf')
-          .toBuffer();
-
-          // Composite the cropped image onto the blank PDF page
-          outputBuffer = await sharp(pdfPageBuffer)
-            .composite([{ input: croppedBuffer, top: 0, left: 0 }])
+          logger.info('[BorderDetector] Attempting vector-aware PDF crop via page boxes');
+          await cropPdfVector(imagePath, finalOutputPath, borderData);
+          wroteFileDirectly = true;
+          processedSize = (await fs.stat(finalOutputPath)).size;
+          logger.info('[BorderDetector] Vector crop succeeded, PDF saved without rasterization.');
+        } catch (vectorError) {
+          logger.error('[BorderDetector] Vector PDF cropping failed, falling back to raster export:', vectorError);
+          // Convert cropped buffer to high-quality JPEG to keep PDF size manageable
+          const pdfImageQuality = Math.min(Math.max(options.pdfQuality ?? 85, 10), 95);
+          const pdfImageBuffer = await sharp(croppedBuffer)
+            .jpeg({
+              quality: pdfImageQuality,
+              mozjpeg: true,
+              chromaSubsampling: '4:4:4'
+            })
             .toBuffer();
-
-          logger.info(`[BorderDetector] PDF created successfully using Sharp, size: ${(outputBuffer.length / 1024).toFixed(1)}KB`);
-
-        } catch (pdfError) {
-          logger.error(`[BorderDetector] PDF generation with Sharp failed: ${pdfError.message}, falling back to PNG`);
-          outputBuffer = croppedBuffer;
-          finalOutputPath = finalOutputPath.replace(/\.pdf$/, '.png');
-          actualOutputFormat = 'png';
-          logger.info(`[BorderDetector] Fallback: Saving as PNG instead: ${finalOutputPath}`);
+          outputBuffer = await createRasterizedPdf(pdfImageBuffer, borderData, imagePath);
+          processedSize = outputBuffer.length;
+          logger.info(`[BorderDetector] Raster PDF fallback size: ${(processedSize / 1024).toFixed(1)}KB`);
         }
       } else if (options.outputFormat === 'svg') {
         // Wrap cropped PNG in an SVG <image> element
         const svgContent = `<?xml version="1.0" encoding="UTF-8"?>\n<svg xmlns="http://www.w3.org/2000/svg" width="${borderData.width}" height="${borderData.height}">\n  <image href=\"data:image/png;base64,${croppedBuffer.toString('base64')}\" width=\"${borderData.width}\" height=\"${borderData.height}\"/>\n</svg>`;
         outputBuffer = Buffer.from(svgContent, 'utf8');
       }
-      await fs.writeFile(finalOutputPath, outputBuffer);
+      if (!wroteFileDirectly) {
+        await fs.writeFile(finalOutputPath, outputBuffer);
+        processedSize = processedSize ?? outputBuffer.length;
+      }
       const processingTime = Date.now() - startTime;
       logger.info(`[BorderDetector] Successfully processed ${imagePath} in ${processingTime}ms - Final output: ${finalOutputPath} (${actualOutputFormat} format)`);
       logger.info(`[DEBUG-${callId}] processImage completed for ${path.basename(imagePath)}`);
@@ -1044,7 +1050,7 @@ async function processImage(imagePath, options = {}) {
         processingTime,
         fileSize: {
           original: imageBuffer.length,
-          processed: outputBuffer.length
+          processed: processedSize ?? 0
         },
         isPdf
       };
@@ -1086,6 +1092,15 @@ async function processBatch(imagePaths, options = {}, progressCallback = null) {
     outputDir = null,
     signal // AbortSignal from AbortController
   } = options;
+  const runTimestamp = options.runTimestamp instanceof Date ? options.runTimestamp : new Date();
+  const resolvedOutputDir = outputDir || getRunOutputDirectory(runTimestamp);
+  try {
+    await fs.mkdir(resolvedOutputDir, { recursive: true });
+    logger.info(`[BorderDetector] Output directory prepared: ${resolvedOutputDir}`);
+  } catch (dirError) {
+    logger.error('[BorderDetector] Failed to prepare output directory:', dirError);
+    throw new Error(`Unable to prepare output directory: ${dirError.message}`);
+  }
   
   // DEBUG: Add unique batch call tracking
   const batchId = `processBatch_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
@@ -1128,7 +1143,7 @@ async function processBatch(imagePaths, options = {}, progressCallback = null) {
         };
       }
       // Pass the abort signal down to processImage if it can use it (currently uses timeout)
-      const result = await processImage(imagePath, { ...options, outputDir, signal }); 
+      const result = await processImage(imagePath, { ...options, outputDir: resolvedOutputDir, signal }); 
       
       if (result.success) {
         successful++;
@@ -1216,6 +1231,112 @@ async function processBatch(imagePaths, options = {}, progressCallback = null) {
     errors,
     summary
   };
+}
+
+const clampValue = (value, min, max) => Math.min(Math.max(value, min), max);
+
+async function cropPdfVector(originalPdfPath, outputPdfPath, borderData) {
+  const pdfBytes = await fs.readFile(originalPdfPath);
+  const pdfDoc = await PdfLibDocument.load(pdfBytes);
+  const pages = pdfDoc.getPages();
+  if (pages.length === 0) {
+    throw new Error('PDF has no pages to crop');
+  }
+  const page = pages[0];
+  const { width: pageWidth, height: pageHeight } = page.getSize();
+
+  const originalDims = borderData.originalDimensions || borderData.metadata?.originalSize;
+  if (!originalDims?.width || !originalDims?.height) {
+    throw new Error('Missing original dimensions for vector PDF cropping');
+  }
+
+  const pixelWidth = originalDims.width;
+  const pixelHeight = originalDims.height;
+
+  const leftPx = borderData.left ?? borderData.borderSizes?.left ?? 0;
+  const topPx = borderData.top ?? borderData.borderSizes?.top ?? 0;
+  const cropWidthPx = borderData.width ?? (pixelWidth - leftPx - (borderData.borderSizes?.right ?? 0));
+  const cropHeightPx = borderData.height ?? (pixelHeight - topPx - (borderData.borderSizes?.bottom ?? 0));
+  const bottomPx = Math.max(pixelHeight - (topPx + cropHeightPx), 0);
+
+  const toPdfX = (px) => (px / pixelWidth) * pageWidth;
+  const toPdfY = (px) => (px / pixelHeight) * pageHeight;
+
+  let x = toPdfX(leftPx);
+  let y = toPdfY(bottomPx);
+  let w = toPdfX(cropWidthPx);
+  let h = toPdfY(cropHeightPx);
+
+  const minSize = 0.5;
+  x = clampValue(x, 0, Math.max(pageWidth - minSize, 0));
+  y = clampValue(y, 0, Math.max(pageHeight - minSize, 0));
+  w = clampValue(w, minSize, pageWidth - x);
+  h = clampValue(h, minSize, pageHeight - y);
+
+  page.setMediaBox(x, y, w, h);
+  page.setCropBox(x, y, w, h);
+  page.setTrimBox(x, y, w, h);
+  page.setBleedBox(x, y, w, h);
+
+  const croppedPdfBytes = await pdfDoc.save();
+  await fs.writeFile(outputPdfPath, croppedPdfBytes);
+}
+
+async function createRasterizedPdf(imageBuffer, borderData, sourcePdfPath = null) {
+  let widthPoints = borderData.width;
+  let heightPoints = borderData.height;
+
+  if (sourcePdfPath) {
+    try {
+      const { width: pageWidth, height: pageHeight } = await getPdfPageSize(sourcePdfPath);
+      const originalDims = borderData.originalDimensions || borderData.metadata?.originalSize;
+      if (originalDims?.width && originalDims?.height) {
+        widthPoints = clampValue(
+          (borderData.width / originalDims.width) * pageWidth,
+          1,
+          pageWidth
+        );
+        heightPoints = clampValue(
+          (borderData.height / originalDims.height) * pageHeight,
+          1,
+          pageHeight
+        );
+      }
+    } catch (err) {
+      logger.warn('[BorderDetector] Using pixel dimensions for raster PDF fallback size due to page size lookup failure.', err);
+    }
+  }
+
+  const doc = new PdfKitDocument({
+    size: [widthPoints, heightPoints],
+    margin: 0
+  });
+
+  const pdfChunks = [];
+
+  return await new Promise((resolve, reject) => {
+    doc.on('data', chunk => pdfChunks.push(chunk));
+    doc.on('end', () => resolve(Buffer.concat(pdfChunks)));
+    doc.on('error', reject);
+
+    doc.image(imageBuffer, 0, 0, {
+      width: widthPoints,
+      height: heightPoints,
+      align: 'center',
+      valign: 'center'
+    });
+    doc.end();
+  });
+}
+
+async function getPdfPageSize(pdfPath) {
+  const pdfBytes = await fs.readFile(pdfPath);
+  const pdfDoc = await PdfLibDocument.load(pdfBytes);
+  const pages = pdfDoc.getPages();
+  if (pages.length === 0) {
+    throw new Error('PDF has no pages');
+  }
+  return pages[0].getSize();
 }
 
 // Export the enhanced border detection module

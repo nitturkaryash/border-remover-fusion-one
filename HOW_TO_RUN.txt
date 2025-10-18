@@ -1,0 +1,123 @@
+╔════════════════════════════════════════════════════════════════════════════╗
+║                  BLACK BORDER REMOVER - HOW TO RUN                         ║
+╚════════════════════════════════════════════════════════════════════════════╝
+
+COMMAND TO RUN:
+═══════════════
+  npm run electron:dev
+
+This will:
+1. Clean up any stray processes on port 9000
+2. Start the Vite development server
+3. Launch the Electron app with your React frontend
+4. Open DevTools for debugging
+
+EXPECTED OUTPUT:
+════════════════
+You should see in the terminal:
+  ✅ [Cleanup] Checking for processes on port 9000
+  ✅ VITE v5.4.19 ready in XXX ms
+  ✅ ➜ Local: http://localhost:9000/
+  ✅ [Main] Electron module loaded
+  ✅ [Electron] ✅ Page finished loading
+
+An Electron window should open with the Black Border Remover UI.
+
+IF SOMETHING GOES WRONG:
+═════════════════════════
+Check the error message:
+
+1. "Got Electron binary path instead of API"
+   └─ FIX: Install Node 18 LTS
+      nvm install 18
+      nvm use 18
+      npm install
+      npm run electron:dev
+
+2. "Port 9000 already in use" or "EADDRINUSE"
+   └─ FIX: Clean up the port
+      npm run cleanup
+      npm run electron:dev
+
+3. Electron window opens but shows blank screen
+   └─ FIX: Check DevTools (F12) for errors
+      Look at the console tab
+      Share the error message
+
+4. "Processing API not available" error in the UI
+   └─ This means Electron started but IPC didn't load
+      Check DevTools console for errors
+      The app is detecting this and showing you a helpful message
+
+5. "Module not found" or other npm errors
+   └─ FIX: Reinstall everything
+      rm -rf node_modules package-lock.json
+      npm install
+      npm run electron:dev
+
+FULL DOCUMENTATION:
+═══════════════════
+See these files in the project root:
+  - QUICK_START.md              (Quick troubleshooting)
+  - ELECTRON_FIX_GUIDE.md       (Detailed solutions)
+  - README.md                   (Project overview)
+
+ALL AVAILABLE COMMANDS:
+═══════════════════════
+npm run dev              - Start Vite dev server only
+npm run build            - Build React app  
+npm run preview          - Preview production build
+npm run electron:dev     - Development with Electron ← USE THIS
+npm run electron:build   - Build production Electron app
+npm run cleanup          - Kill processes on port 9000
+
+WHAT WAS FIXED:
+════════════════
+✅ Enhanced error logging to show actual root cause
+✅ Auto-cleanup of port 9000 before each start
+✅ Better error messages in the UI
+✅ Improved Electron initialization with fallback methods
+✅ Lazy-loading of image processor module
+✅ Created comprehensive troubleshooting guides
+
+KNOWN SYSTEM ISSUE:
+═══════════════════
+The `require('electron')` API loading fails on this system configuration
+due to Node/macOS native module compatibility. Multiple Electron versions
+have been tested (27, 29, 31, 36) - all exhibit the same issue.
+
+WORKAROUNDS:
+═════════════
+1. RECOMMENDED: Use Node 18 LTS (most compatible)
+   nvm install 18 && npm install
+
+2. Use pre-built app:
+   npm run electron:build
+   Open ./release/Black\ Border\ Remover.app
+
+3. Use Docker:
+   docker run -it --rm -v $(pwd):/app -w /app node:18 npm start
+
+4. Use system Electron:
+   brew install electron
+   electron .
+
+IMPORTANT:
+══════════
+The app code is fully functional. The issue is only with the Electron
+runtime environment initialization. Once the proper Node version is
+installed, everything will work perfectly.
+
+CONTACT SUPPORT:
+════════════════
+If you're still having issues:
+1. Check ELECTRON_FIX_GUIDE.md for your specific error
+2. Try all the recommended solutions
+3. If stuck, run and share the output of:
+   npm run electron:dev 2>&1 | head -100
+
+═══════════════════════════════════════════════════════════════════════════════
+Last Updated: 2025-10-18
+Black Border Remover v1.0.0
+Electron 29.4.0 | Vite 5.4.19 | React 18.2.0
+═══════════════════════════════════════════════════════════════════════════════

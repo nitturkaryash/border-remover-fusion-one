@@ -49,8 +49,20 @@ export const BatchProcessorLayout: React.FC<BatchProcessorLayoutProps> = ({
   } | null>(null);
 
   useEffect(() => {
-    console.log('BatchProcessorLayout mounted, window.electronAPI:', !!window.electronAPI);
-    
+    console.log('========================================');
+    console.log('BatchProcessorLayout mounted');
+    console.log('window.electronAPI available:', !!window.electronAPI);
+
+    if (window.electronAPI) {
+      console.log('✅ Running in Electron mode with full API access');
+      console.log('Available API methods:', Object.keys(window.electronAPI));
+    } else {
+      console.warn('❌ Running in BROWSER mode - electronAPI NOT available');
+      console.warn('⚠️ Image processing will NOT work in browser mode!');
+      console.warn('💡 To run properly, use: npm run electron:dev');
+    }
+    console.log('========================================');
+
     let cleanupSelect: (() => void) | void;
     let cleanupProgress: (() => void) | void;
     let cleanupComplete: (() => void) | void;
@@ -70,7 +82,7 @@ export const BatchProcessorLayout: React.FC<BatchProcessorLayoutProps> = ({
           stopProcessing();
           setCurrentProcessingFile(undefined);
           setIsComplete(true);
-          result.errors.forEach(err => addError(err)); 
+          result.errors.forEach(err => addError(err));
 
           const croppedCount = result.summary?.cropped ?? result.processedFiles.filter(f => (f as any).cropped).length;
           const totalCount = result.summary?.total ?? (result.processedFiles.length + result.errors.length);
@@ -85,8 +97,8 @@ export const BatchProcessorLayout: React.FC<BatchProcessorLayoutProps> = ({
 
           // Calculate statistics for better user feedback
           const processedCount = successfulCount - croppedCount;
-          
-          const notificationBody = failedCount === 0 
+
+          const notificationBody = failedCount === 0
             ? `${successfulCount} files processed successfully. ${croppedCount} cropped, ${processedCount} had no borders.`
             : `${successfulCount} of ${totalCount} files processed. ${failedCount} error(s).`;
 
@@ -96,14 +108,12 @@ export const BatchProcessorLayout: React.FC<BatchProcessorLayoutProps> = ({
           });
           setOutputFolder(result.outputDir || null);
         });
-        console.log('Electron event listeners registered successfully');
+        console.log('✅ Electron event listeners registered successfully');
       } catch (error) {
-        console.error('Error setting up Electron API listeners:', error);
+        console.error('❌ Error setting up Electron API listeners:', error);
       }
-    } else {
-      console.warn('window.electronAPI is not available - running in browser mode');
     }
-    
+
     return () => {
       if (typeof cleanupSelect === 'function') cleanupSelect();
       if (typeof cleanupProgress === 'function') cleanupProgress();
@@ -224,7 +234,14 @@ export const BatchProcessorLayout: React.FC<BatchProcessorLayoutProps> = ({
       return;
     }
     if (!window.electronAPI || !window.electronAPI.startImageProcessing) {
-        toast({ title: 'Error', description: 'Processing API not available.', variant: 'destructive' });
+        console.error('❌ Processing API not available!');
+        console.error('This usually means the app is running in browser mode instead of Electron.');
+        console.error('To fix: Close this browser tab and run: npm run electron:dev');
+        toast({
+          title: 'Electron API Not Available',
+          description: 'This app must run in Electron. Close this browser and run: npm run electron:dev',
+          variant: 'destructive'
+        });
         return;
     }
     if (files.some(file => !file.path)) {

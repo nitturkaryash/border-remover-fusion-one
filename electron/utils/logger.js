@@ -2,13 +2,10 @@
 // This module will set up and provide a logger (e.g., Winston).
 
 const { createLogger, format, transports } = require('winston');
-const path = require('path');
-const os = require('os');
 
-// Ensure logs directory exists
-const logsDir = path.join(os.homedir(), 'AppData', 'Local', 'BlackBorderRemover', 'logs'); // Adjust for macOS/Linux
-// For cross-platform, consider app.getPath('userData') from electron
-// const logsDir = require('electron').app.getPath('logs'); // This is better if used within Electron's main/renderer context post-app-ready
+// For cross-platform logging, use app.getPath('userData') from electron
+// Example: const logsDir = require('electron').app.getPath('logs');
+// This is better when used within Electron's main/renderer context post-app-ready
 
 // Basic setup for a file logger. In a real app, use app.getPath('logs') from Electron.
 const logger = createLogger({
@@ -34,6 +31,15 @@ const logger = createLogger({
     })
   ]
 });
+
+// Handle EPIPE errors gracefully when process exits
+if (logger.transports[0] && logger.transports[0].stream) {
+  logger.transports[0].stream.on('error', (err) => {
+    if (err.code !== 'EPIPE') {
+      console.error('Logger stream error:', err);
+    }
+  });
+}
 
 // If not in production, also log to the console
 // if (process.env.NODE_ENV !== 'production') {
