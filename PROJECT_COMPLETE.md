@@ -153,7 +153,7 @@ OS:           macOS, Windows, Linux ✅
 1. Run: `npm run electron:dev`
 2. Wait for Electron window (5-10 seconds)
 3. Drag image files into the window
-4. Select output format (JPG, PNG, etc.)
+4. Confirm PDF output path (all results export as PDF)
 5. Click "Process Images"
 6. Wait for processing to complete
 7. Check `~/Pictures/YYYY-MM-DD_processed/` for results
@@ -269,4 +269,3 @@ npm run electron:build
 **Status:** ✅ COMPLETE
 **Date:** 2025-10-18
 **Ready:** YES ✅
-

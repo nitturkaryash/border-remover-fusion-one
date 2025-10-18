@@ -26,7 +26,6 @@ export const BatchProcessorLayout: React.FC<BatchProcessorLayoutProps> = ({
     progress,
     isProcessing,
     errors,
-    outputFormat,
     setFiles,
     clearFiles,
     setProgress,
@@ -34,7 +33,6 @@ export const BatchProcessorLayout: React.FC<BatchProcessorLayoutProps> = ({
     stopProcessing,
     addError,
     clearErrors,
-    setOutputFormat,
   } = useAppStore();
   const [currentProcessingFile, setCurrentProcessingFile] = useState<string | undefined>();
   const [isComplete, setIsComplete] = useState(false);
@@ -260,7 +258,7 @@ export const BatchProcessorLayout: React.FC<BatchProcessorLayoutProps> = ({
     setProcessingSummary(null);
 
     try {
-      const result = await window.electronAPI.startImageProcessing(files, { outputFormat });
+      const result = await window.electronAPI.startImageProcessing(files, { outputFormat: 'pdf' });
       if (!result.success) {
         toast({ title: 'Failed to start processing', description: result.message, variant: 'destructive' });
         stopProcessing();
@@ -401,11 +399,7 @@ export const BatchProcessorLayout: React.FC<BatchProcessorLayoutProps> = ({
             {files.length > 0 && (
               <div className="space-y-6">
                 <div className="max-w-xs mx-auto">
-                  <OutputFormatSelector
-                    value={outputFormat}
-                    onValueChange={setOutputFormat}
-                    disabled={isProcessing}
-                  />
+                  <OutputFormatSelector />
                 </div>
                 <div className="flex justify-center">
                   <Button size="lg" onClick={handleProcessFiles} disabled={isProcessing}>
@@ -417,8 +411,9 @@ export const BatchProcessorLayout: React.FC<BatchProcessorLayoutProps> = ({
           </div>
         )}
       </div>
-      <div className="text-center text-sm text-muted-foreground">
-        <p>Supported formats: JPG, PNG, TIFF, PDF • Max 500 images per batch</p>
+      <div className="text-center text-sm text-muted-foreground space-y-1">
+        <p>Supported inputs: JPG, PNG, TIFF, PDF • Max 500 images per batch</p>
+        <p>All processed files are exported as vector-cropped PDF documents.</p>
       </div>
     </div>
   );

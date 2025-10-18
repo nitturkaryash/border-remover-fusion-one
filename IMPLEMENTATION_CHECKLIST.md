@@ -174,7 +174,7 @@
 
 ### Short-term
 1. [ ] Process multiple images
-2. [ ] Try different output formats
+2. [ ] Confirm PDF output opens correctly
 3. [ ] Test batch processing
 4. [ ] Verify output quality
 

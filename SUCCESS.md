@@ -80,10 +80,9 @@ This shows:
 Try these steps:
 
 1. **Drag an image file** into the Electron window
-2. **Select output format** (e.g., PNG, JPG)
-3. **Click "Process Images"** button
-4. **Monitor the progress** in real-time
-5. **Check the output** in `~/Pictures/YYYY-MM-DD_processed/`
+2. **Click "Process Images"** button (output is always saved as PDF)
+3. **Monitor the progress** in real-time
+4. **Check the output** in `~/Pictures/YYYY-MM-DD_processed/`
 
 ---
 

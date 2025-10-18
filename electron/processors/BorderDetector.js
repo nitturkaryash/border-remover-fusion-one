@@ -482,113 +482,13 @@ async function cropImage(imageBuffer, borders, options = {}) {
       pipeline = pipeline.rotate(90);
     }
     
-    // Apply format-specific optimization based on desired output format
-    const outputFormat = options.outputFormat || 'original';
-    
-    if (outputFormat === 'original') {
-      // Use original format with maximum quality
-      switch (metadata.format) {
-        case 'jpeg':
-          pipeline = pipeline.jpeg({ 
-            quality, 
-            progressive: true,
-            mozjpeg: true // Use mozjpeg encoder for better quality
-          });
-          break;
-        case 'png':
-          pipeline = pipeline.png({ 
-            compressionLevel: compression, 
-            progressive: true,
-            palette: false, // Avoid palette compression for better quality
-            quality: 100    // Maximum PNG quality
-          });
-          break;
-        case 'tiff':
-          pipeline = pipeline.tiff({ 
-            compression: 'none', // No compression for maximum quality
-            quality: 100
-          });
-          break;
-        case 'webp':
-          pipeline = pipeline.webp({ 
-            quality: 100, 
-            lossless: true, // Use lossless WebP for maximum quality
-            effort: 6       // Maximum compression effort
-          });
-          break;
-        default:
-          // For unknown formats, save as high-quality PNG
-          pipeline = pipeline.png({ 
-            compressionLevel: 0, 
-            progressive: true,
-            palette: false,
-            quality: 100
-          });
-          break;
-      }
-    } else {
-      // Convert to specified format
-      switch (outputFormat) {
-        case 'png':
-          pipeline = pipeline.png({ 
-            compressionLevel: compression, 
-            progressive: true,
-            palette: false,
-            quality: 100
-          });
-          break;
-        case 'jpg':
-        case 'jpeg':
-          pipeline = pipeline.jpeg({ 
-            quality, 
-            progressive: true,
-            mozjpeg: true
-          });
-          break;
-        case 'tiff':
-          pipeline = pipeline.tiff({ 
-            compression: 'none',
-            quality: 100
-          });
-          break;
-        case 'webp':
-          pipeline = pipeline.webp({ 
-            quality: 100, 
-            lossless: true,
-            effort: 6
-          });
-          break;
-        case 'pdf':
-          // For PDF output, convert to PNG first (PDFs will be handled separately)
-          pipeline = pipeline.png({ 
-            compressionLevel: 0, 
-            progressive: true,
-            palette: false,
-            quality: 100
-          });
-          break;
-        case 'svg':
-          // For SVG output, convert to PNG first (SVGs will be handled separately)
-          pipeline = pipeline.png({ 
-            compressionLevel: 0, 
-            progressive: true,
-            palette: false,
-            quality: 100
-          });
-          break;
-        default:
-          // Default to PNG for unknown formats
-          pipeline = pipeline.png({ 
-            compressionLevel: 0, 
-            progressive: true,
-            palette: false,
-            quality: 100
-          });
-          break;
-      }
-    }
-    
-    const croppedBuffer = await pipeline.toBuffer();
+    // Convert to PNG for downstream PDF embedding
+    const croppedBuffer = await pipeline.png({ 
+      compressionLevel: 0, 
+      progressive: true,
+      palette: false,
+      quality: 100
+    }).toBuffer();
     
     const processingTime = Date.now() - startTime;
     logger.info(`[BorderDetector] Image cropping completed in ${processingTime}ms`);
@@ -872,7 +772,9 @@ async function processImage(imagePath, options = {}) {
 
   // DEBUG: Add unique call tracking
   const callId = `processImage_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-  logger.info(`[DEBUG-${callId}] processImage called for ${path.basename(imagePath)} with outputFormat: ${options.outputFormat}`);
+  const enforcedOutputFormat = 'pdf';
+  options.outputFormat = enforcedOutputFormat;
+  logger.info(`[DEBUG-${callId}] processImage called for ${path.basename(imagePath)} with outputFormat: ${enforcedOutputFormat}`);
 
   // Create timeout promise
   const timeoutPromise = new Promise((_, reject) => {
@@ -886,7 +788,7 @@ async function processImage(imagePath, options = {}) {
         logger.info(`[BorderDetector] Processing of ${imagePath} aborted before start.`);
         throw new Error('Processing aborted by signal');
       }
-      logger.info(`[BorderDetector] Starting to process: ${imagePath}`, { outputFormat: options.outputFormat });
+      logger.info(`[BorderDetector] Starting to process: ${imagePath}`, { outputFormat: enforcedOutputFormat });
       const validation = await validateFile(imagePath);
       if (!validation.valid) {
         throw new Error(validation.error);
@@ -930,7 +832,7 @@ async function processImage(imagePath, options = {}) {
       logger.info(`[BorderDetector] Image loaded: ${imageMeta.format || ''}`);
       // Detect borders
       const borderData = await detectBorders(imageBuffer, { threshold });
-      const outputFormat = options.outputFormat || 'original';
+      const outputFormat = enforcedOutputFormat;
       if (!borderData.hasBorders) {
         logger.info(`[BorderDetector] No significant borders detected: ${imagePath}`);
         
@@ -977,7 +879,7 @@ async function processImage(imagePath, options = {}) {
       const croppedBuffer = await cropImage(imageBuffer, borderData, { 
         rotateFinalOutput: shouldRotateForPdf,
         preserveOrientation: true, // Always preserve original orientation
-        outputFormat: options.outputFormat
+        outputFormat: enforcedOutputFormat
       });
       // Generate output path
       let finalOutputPath;
@@ -988,24 +890,20 @@ async function processImage(imagePath, options = {}) {
         const base = path.basename(imagePath, path.extname(imagePath));
         
         // Determine file extension based on outputFormat, defaulting to png
-        let extension = `.${options.outputFormat || 'png'}`;
-        if (options.outputFormat === 'original' || options.outputFormat === 'pdf') {
-          extension = '.pdf';
-        } else if (options.outputFormat === 'jpg') {
-          extension = '.jpeg';
-        }
+        let extension = '.pdf';
 
         finalOutputPath = path.join(baseOutputDir, `${base}_page1_cropped${extension}`);
       } else {
-        finalOutputPath = generateOutputPath(imagePath, { outputFormat: options.outputFormat, outputDir: baseOutputDir, addTimestamp: false });
+        finalOutputPath = generateOutputPath(imagePath, { outputFormat: enforcedOutputFormat, outputDir: baseOutputDir, addTimestamp: false });
       }
       await ensureOutputDirectory(finalOutputPath);
       let outputBuffer = croppedBuffer;
-      let actualOutputFormat = options.outputFormat || 'original';
+      let actualOutputFormat = enforcedOutputFormat;
       let wroteFileDirectly = false;
       let processedSize = null;
 
       if (actualOutputFormat === 'pdf') {
+        if (isPdf) {
         try {
           logger.info('[BorderDetector] Attempting vector-aware PDF crop via page boxes');
           await cropPdfVector(imagePath, finalOutputPath, borderData);
@@ -1027,10 +925,18 @@ async function processImage(imagePath, options = {}) {
           processedSize = outputBuffer.length;
           logger.info(`[BorderDetector] Raster PDF fallback size: ${(processedSize / 1024).toFixed(1)}KB`);
         }
-      } else if (options.outputFormat === 'svg') {
-        // Wrap cropped PNG in an SVG <image> element
-        const svgContent = `<?xml version="1.0" encoding="UTF-8"?>\n<svg xmlns="http://www.w3.org/2000/svg" width="${borderData.width}" height="${borderData.height}">\n  <image href=\"data:image/png;base64,${croppedBuffer.toString('base64')}\" width=\"${borderData.width}\" height=\"${borderData.height}\"/>\n</svg>`;
-        outputBuffer = Buffer.from(svgContent, 'utf8');
+        } else {
+          const pdfImageQuality = Math.min(Math.max(options.pdfQuality ?? 85, 10), 95);
+          const pdfImageBuffer = await sharp(croppedBuffer)
+            .jpeg({
+              quality: pdfImageQuality,
+              mozjpeg: true,
+              chromaSubsampling: '4:4:4'
+            })
+            .toBuffer();
+          outputBuffer = await createRasterizedPdf(pdfImageBuffer, borderData);
+          processedSize = outputBuffer.length;
+        }
       }
       if (!wroteFileDirectly) {
         await fs.writeFile(finalOutputPath, outputBuffer);
@@ -1093,6 +999,7 @@ async function processBatch(imagePaths, options = {}, progressCallback = null) {
     signal // AbortSignal from AbortController
   } = options;
   const runTimestamp = options.runTimestamp instanceof Date ? options.runTimestamp : new Date();
+  options.outputFormat = 'pdf';
   const resolvedOutputDir = outputDir || getRunOutputDirectory(runTimestamp);
   try {
     await fs.mkdir(resolvedOutputDir, { recursive: true });

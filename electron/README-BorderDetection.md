@@ -473,7 +473,7 @@ The modular architecture allows for easy extension:
 - Add new detection algorithms in `BorderDetector.js`
 - Implement custom progress callbacks in `ImageBatch.js`
 - Extend file validation in `fileValidator.js`
-- Add new output formats and optimization strategies
+- Improve PDF export and optimization strategies
 
 ## License & Support
 

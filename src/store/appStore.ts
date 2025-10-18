@@ -16,7 +16,7 @@ export interface ProcessingError {
   message: string;
 }
 
-export type OutputFormat = 'original' | 'pdf' | 'svg' | 'png' | 'jpg';
+export type OutputFormat = 'pdf';
 
 interface AppState {
   files: FileMeta[];
@@ -33,7 +33,6 @@ interface AppState {
   stopProcessing: () => void;
   addError: (error: ProcessingError) => void;
   clearErrors: () => void;
-  setOutputFormat: (format: OutputFormat) => void;
 }
 
 export const useAppStore = create<AppState>((set) => ({
@@ -41,7 +40,7 @@ export const useAppStore = create<AppState>((set) => ({
   progress: 0,
   isProcessing: false,
   errors: [],
-  outputFormat: 'original',
+  outputFormat: 'pdf',
   
   setFiles: (files) => set({ files }),
   clearFiles: () => set({ files: [] }),
@@ -50,5 +49,4 @@ export const useAppStore = create<AppState>((set) => ({
   stopProcessing: () => set({ isProcessing: false }),
   addError: (error) => set((state) => ({ errors: [...state.errors, error] })),
   clearErrors: () => set({ errors: [] }),
-  setOutputFormat: (format) => set({ outputFormat: format }),
-})); 
+}));
