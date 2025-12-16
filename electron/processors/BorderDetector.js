@@ -6,10 +6,12 @@ const sharp = require('sharp');
 const path = require('path');
 const fs = require('fs').promises;
 const os = require('os');
+const { promisify } = require('util');
+const { execFile } = require('child_process');
 const PdfKitDocument = require('pdfkit');
 const { PDFDocument: PdfLibDocument } = require('pdf-lib');
 const logger = require('../utils/logger');
-const pdf2pic = require('pdf2pic');
+const execFileAsync = promisify(execFile);
 
 // Configuration constants
 const CONFIG = {
@@ -22,6 +24,7 @@ const CONFIG = {
   CHUNK_SIZE: 2048,              // Process large images in chunks
   MAX_DIMENSION: 10000,          // Maximum image dimension to prevent memory issues
   TIMEOUT_MS: 30000,             // 30 second timeout per image
+  PDF_TIMEOUT_PER_PAGE: 10000,   // Extra timeout budget per additional PDF page
   
   // File handling
   MAX_FILE_SIZE: 50 * 1024 * 1024, // 50MB max file size
@@ -29,13 +32,109 @@ const CONFIG = {
   
   // Output settings - MAXIMUM QUALITY
   QUALITY: 100,                  // JPEG quality for output (maximum quality)
-  COMPRESSION: 0                 // PNG compression level (no compression for maximum quality)
+  COMPRESSION: 4                 // Mild lossless PNG compression (keeps quality, trims ~5% size)
 };
 
 // Add PDF to supported formats
 CONFIG.SUPPORTED_FORMATS.push('pdf');
 
+// Ghostscript discovery (cross-platform)
+const GHOSTSCRIPT_CANDIDATES = [
+  process.env.GHOSTSCRIPT_PATH,
+  process.env.GS_PATH,
+  ...(process.platform === 'win32' ? ['gswin64c', 'gswin32c', 'gs'] : ['gs'])
+].filter(Boolean);
+
+let cachedGhostscriptBinary = null;
+
 const DEFAULT_OUTPUT_ROOT = path.join(os.homedir(), 'BlackBorderRemover', 'processed');
+
+class PdfPageOutOfRangeError extends Error {
+  constructor(pageNumber) {
+    super(`PDF page ${pageNumber} is out of range`);
+    this.name = 'PdfPageOutOfRangeError';
+    this.code = 'PDF_PAGE_OUT_OF_RANGE';
+    this.pageNumber = pageNumber;
+  }
+}
+
+const DEFAULT_PDF_DENSITY = 300;
+
+async function resolveGhostscriptBinary() {
+  if (cachedGhostscriptBinary) {
+    return cachedGhostscriptBinary;
+  }
+
+  for (const candidate of GHOSTSCRIPT_CANDIDATES) {
+    try {
+      const { stdout } = await execFileAsync(candidate, ['-v']);
+      const version = stdout?.split('\n')?.[0] || 'unknown';
+      logger.info(`[BorderDetector-PDF] Found Ghostscript binary: ${candidate} (${version})`);
+      cachedGhostscriptBinary = candidate;
+      return candidate;
+    } catch (error) {
+      logger.debug?.(`[BorderDetector-PDF] Ghostscript candidate failed: ${candidate}`, { error: error.message });
+    }
+  }
+
+  throw new Error('Ghostscript executable not found in PATH. Install Ghostscript and restart the app.');
+}
+
+async function renderPdfPageWithGhostscript(pdfPath, pageNumber, outputPath) {
+  const ghostscriptBinary = await resolveGhostscriptBinary();
+  const timeoutBudget = CONFIG.TIMEOUT_MS + CONFIG.PDF_TIMEOUT_PER_PAGE * Math.max(pageNumber - 1, 0);
+
+  const args = [
+    '-dSAFER',
+    '-dBATCH',
+    '-dNOPAUSE',
+    `-dFirstPage=${pageNumber}`,
+    `-dLastPage=${pageNumber}`,
+    '-sDEVICE=png16m',
+    '-dTextAlphaBits=4',
+    '-dGraphicsAlphaBits=4',
+    `-r${DEFAULT_PDF_DENSITY}`,
+    '-dUseCropBox',
+    `-sOutputFile=${outputPath}`,
+    pdfPath
+  ];
+
+  logger.info(`[BorderDetector-PDF] Running Ghostscript for page ${pageNumber}`, {
+    binary: ghostscriptBinary,
+    args
+  });
+
+  try {
+    await execFileAsync(ghostscriptBinary, args, { timeout: timeoutBudget });
+  } catch (error) {
+    logger.error('[BorderDetector-PDF] Ghostscript conversion failed', {
+      binary: ghostscriptBinary,
+      args,
+      error: error.message
+    });
+
+    if (error.code === 'ENOENT') {
+      throw new Error('Ghostscript executable not found. Install Ghostscript and restart the app.');
+    }
+
+    throw new Error(`Ghostscript failed to render PDF page ${pageNumber}: ${error.message}`);
+  }
+}
+
+function pixelsToPdfPoints(pixels, density = DEFAULT_PDF_DENSITY) {
+  const safeDensity = Number.isFinite(density) && density > 0 ? density : DEFAULT_PDF_DENSITY;
+  return Math.max((pixels / safeDensity) * 72, 1);
+}
+
+function derivePageSizeFromMetadata(meta) {
+  if (!meta?.width || !meta?.height) {
+    return null;
+  }
+  return {
+    width: pixelsToPdfPoints(meta.width, meta.density),
+    height: pixelsToPdfPoints(meta.height, meta.density)
+  };
+}
 
 function getRunOutputDirectory(runTimestamp = new Date()) {
   const iso = runTimestamp.toISOString().replace(/[:.]/g, '-').replace('Z', '');
@@ -482,9 +581,11 @@ async function cropImage(imageBuffer, borders, options = {}) {
       pipeline = pipeline.rotate(90);
     }
     
-    // Convert to PNG for downstream PDF embedding
+    // Convert to PNG for downstream PDF embedding (lossless, lightly compressed)
+    const normalizedCompression = Math.min(Math.max(Number.isFinite(compression) ? compression : CONFIG.COMPRESSION, 0), 9);
     const croppedBuffer = await pipeline.png({ 
-      compressionLevel: 0, 
+      compressionLevel: normalizedCompression, 
+      adaptiveFiltering: true,
       progressive: true,
       palette: false,
       quality: 100
@@ -571,16 +672,17 @@ async function ensureOutputDirectory(filePath) {
 }
 
 /**
- * Converts the first page of a PDF to a PNG buffer
+ * Converts a specific PDF page to a PNG buffer
  * @param {string} pdfPath - Path to the PDF file
- * @returns {Promise<Buffer>} - PNG image buffer of the first page
+ * @param {number} pageNumber - 1-based page index to convert
+ * @returns {Promise<Buffer>} - PNG image buffer of the selected page
  */
-async function convertPdfToImageBuffer(pdfPath) {
-  logger.info(`[BorderDetector-PDF] Attempting to convert PDF: ${pdfPath}`);
+async function convertPdfToImageBuffer(pdfPath, pageNumber = 1) {
+  logger.info(`[BorderDetector-PDF] Attempting to convert PDF page ${pageNumber}: ${pdfPath}`);
   
   // Check if file exists and is readable
   try {
-    await fs.access(pdfPath, fs.constants.R_OK);
+    await fs.access(pdfPath);
     const stats = await fs.stat(pdfPath);
     logger.info(`[BorderDetector-PDF] PDF file accessible, size: ${(stats.size / 1024).toFixed(1)}KB`);
   } catch (accessError) {
@@ -588,113 +690,28 @@ async function convertPdfToImageBuffer(pdfPath) {
     throw new Error(`PDF file not accessible: ${accessError.message}`);
   }
 
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'bbr-gs-'));
+  const outputPath = path.join(tempDir, `page-${pageNumber}.png`);
+
   try {
-    // Use pdf2pic v3.x API with fromPath method
-    logger.info('[BorderDetector-PDF] Initializing pdf2pic converter with fromPath method...');
-    
-    // Force a portrait orientation to maintain the document's original orientation
-    // This is critical for proper document viewing - MAXIMUM QUALITY SETTINGS
-    const converter = pdf2pic.fromPath(pdfPath, {
-      density: 300, // Balanced DPI to keep size reasonable while maintaining clarity
-      format: "png",
-      quality: 90,
-      // savePath: "./temp_pdf_conversion", // Temporary path, not used for base64
-      // saveFilename: "temp_pdf_page",
-      // Critical: Force preservation of PDF orientation as it appears in viewer
-      preserveOrientation: true,
-      autoOrient: false,
-      // Use higher resolution dimensions for better quality
-      width: 1190,  // Double standard A4 width for higher resolution
-      height: 1684  // Double standard A4 height for higher resolution
-    });
-    
-    logger.info('[BorderDetector-PDF] pdf2pic converter initialized with portrait orientation');
+    await renderPdfPageWithGhostscript(pdfPath, pageNumber, outputPath);
 
-    logger.info('[BorderDetector-PDF] Converter initialized. Attempting to convert page 1...');
-    
-    // Convert page 1 to base64 using pdf2pic v3.x API
-    // Try different approaches for pdf2pic v3.x
-    let result;
-    
-    try {
-      // Method 1: Direct call with responseType base64
-      result = await converter(1, { responseType: 'base64' });
-      logger.info('[BorderDetector-PDF] Used converter with responseType base64');
-    } catch (error1) {
-      logger.warn('[BorderDetector-PDF] Method 1 failed, trying alternative...', error1.message);
-      
-      try {
-        // Method 2: Direct call without options
-        result = await converter(1);
-        logger.info('[BorderDetector-PDF] Used converter without options');
-      } catch (error2) {
-        logger.warn('[BorderDetector-PDF] Method 2 failed, trying bulk method...', error2.message);
-        
-        try {
-          // Method 3: Try bulk conversion
-          const bulkResult = await converter.bulk(1, { responseType: 'base64' });
-          result = Array.isArray(bulkResult) ? bulkResult[0] : bulkResult;
-          logger.info('[BorderDetector-PDF] Used bulk converter method');
-        } catch (error3) {
-          logger.error('[BorderDetector-PDF] All conversion methods failed:', {
-            method1: error1.message,
-            method2: error2.message,
-            method3: error3.message
-          });
-          throw new Error(`PDF conversion failed with all methods: ${error1.message}`);
-        }
+    const outputStats = await fs.stat(outputPath).catch(() => null);
+    if (!outputStats || outputStats.size === 0) {
+      logger.warn(`[BorderDetector-PDF] Page ${pageNumber} produced no output PNG (size=${outputStats?.size || 0})`);
+      if (pageNumber > 1) {
+        throw new PdfPageOutOfRangeError(pageNumber);
       }
-    }
-    
-    logger.info('[BorderDetector-PDF] PDF page conversion completed successfully');
-
-    logger.info(`[BorderDetector-PDF] Raw conversion result type: ${typeof result}`, {
-      hasBase64: !!(result && result.base64),
-      resultKeys: result ? Object.keys(result) : 'null',
-      resultLength: result && result.base64 ? result.base64.length : 'no base64'
-    });
-
-    // Handle different result formats
-    let base64Data;
-    
-    if (result && result.base64) {
-      base64Data = result.base64;
-      logger.info('[BorderDetector-PDF] Found base64 in result.base64');
-    } else if (result && typeof result === 'string') {
-      base64Data = result;
-      logger.info('[BorderDetector-PDF] Using result as direct base64 string');
-    } else if (result && result.data) {
-      base64Data = result.data;
-      logger.info('[BorderDetector-PDF] Found base64 in result.data');
-    } else {
-      logger.error('[BorderDetector-PDF] No base64 data found in result:', result);
-      throw new Error('PDF conversion succeeded but no base64 data was returned. This might indicate a Ghostscript issue.');
+      throw new Error('Ghostscript returned no image data for the first page. The PDF may be empty or unsupported.');
     }
 
-    if (!base64Data || base64Data.length === 0) {
-      logger.error('[BorderDetector-PDF] Base64 data is empty. This might mean:');
-      logger.error('[BorderDetector-PDF] 1. PDF has no visual content (text-only PDF)');
-      logger.error('[BorderDetector-PDF] 2. Ghostscript cannot render this PDF');
-      logger.error('[BorderDetector-PDF] 3. PDF file is corrupted or invalid');
-      logger.error('[BorderDetector-PDF] PDF size info:', result?.size || 'no size info');
-      throw new Error('PDF conversion returned empty base64 data - PDF might be text-only or corrupted');
+    const buffer = await fs.readFile(outputPath);
+    if (!buffer || buffer.length === 0) {
+      throw new Error('Ghostscript returned empty PNG data.');
     }
 
-    logger.info(`[BorderDetector-PDF] PDF page 1 converted successfully. Base64 length: ${base64Data.length}`);
-    
-    // Validate base64 data
-    try {
-      const buffer = Buffer.from(base64Data, 'base64');
-      if (buffer.length === 0) {
-        throw new Error('Base64 decode resulted in empty buffer');
-      }
-      logger.info(`[BorderDetector-PDF] Base64 decoded to ${buffer.length} bytes`);
-      return buffer;
-    } catch (decodeError) {
-      logger.error(`[BorderDetector-PDF] Base64 decode failed: ${decodeError.message}`);
-      throw new Error(`Invalid base64 data from PDF conversion: ${decodeError.message}`);
-    }
-
+    logger.info(`[BorderDetector-PDF] PDF page ${pageNumber} converted successfully. Buffer length: ${buffer.length}`);
+    return buffer;
   } catch (error) {
     logger.error(`[BorderDetector-PDF] Complete error details for ${pdfPath}:`, {
       message: error.message,
@@ -706,8 +723,9 @@ async function convertPdfToImageBuffer(pdfPath) {
     if (error.message.includes('spawn') || error.message.includes('ENOENT')) {
       logger.error('[BorderDetector-PDF] This appears to be a Ghostscript installation issue.');
       logger.error('[BorderDetector-PDF] On macOS, install with: brew install ghostscript');
+      logger.error('[BorderDetector-PDF] On Windows, install the Ghostscript 64-bit build and verify with: gswin64c -version');
       logger.error('[BorderDetector-PDF] Then restart the application.');
-      throw new Error('Ghostscript not found. Install with: brew install ghostscript');
+      throw new Error('Ghostscript not found. Install Ghostscript and verify gs/gswin64c is on PATH.');
     } else if (error.message.includes('PDF')) {
       logger.error('[BorderDetector-PDF] This might be a PDF file issue or Ghostscript compatibility problem.');
       throw new Error(`PDF processing failed: ${error.message}. Check if the PDF file is valid and not corrupted.`);
@@ -715,7 +733,76 @@ async function convertPdfToImageBuffer(pdfPath) {
       logger.error('[BorderDetector-PDF] Unknown error during PDF conversion.');
       throw new Error(`PDF to image conversion failed: ${error.message}`);
     }
+  } finally {
+    await fs.rm(tempDir, { recursive: true, force: true });
   }
+}
+
+async function getPdfPageSizes(pdfPath) {
+  const pdfBytes = await fs.readFile(pdfPath);
+  const pdfDoc = await PdfLibDocument.load(pdfBytes);
+  const pages = pdfDoc.getPages();
+  if (pages.length === 0) {
+    throw new Error('PDF has no pages');
+  }
+  return pages.map((page, index) => {
+    const { width, height } = page.getSize();
+    return { width, height, pageNumber: index + 1 };
+  });
+}
+
+async function buildRasterPageImage(pageEntry, { quality, scale = 1, grayscale = false } = {}) {
+  const safeQuality = Math.min(Math.max(Math.round(quality ?? 85), 5), 95);
+  const safeScale = Math.min(Math.max(scale, 0.05), 1);
+  const baseWidth = pageEntry?.borderData?.width || pageEntry?.croppedMeta?.width || pageEntry?.imageMeta?.width || 1000;
+  const baseHeight = pageEntry?.borderData?.height || pageEntry?.croppedMeta?.height || pageEntry?.imageMeta?.height || 1000;
+  const targetWidth = Math.max(Math.round(baseWidth * safeScale), 8);
+  const targetHeight = Math.max(Math.round(baseHeight * safeScale), 8);
+
+  let pipeline = sharp(pageEntry.croppedBuffer);
+
+  if (safeScale < 0.999) {
+    pipeline = pipeline.resize({
+      width: targetWidth,
+      height: targetHeight,
+      fit: 'inside',
+      withoutEnlargement: true
+    });
+  }
+
+  if (pageEntry?.croppedMeta?.hasAlpha) {
+    pipeline = pipeline.flatten({ background: { r: 255, g: 255, b: 255 } });
+  }
+
+  if (grayscale || safeQuality <= 40) {
+    pipeline = pipeline.grayscale();
+  }
+
+  return pipeline.jpeg({
+    quality: safeQuality,
+    mozjpeg: true,
+    chromaSubsampling: '4:4:4',
+    progressive: true
+  }).toBuffer();
+}
+
+async function buildRasterPdfFromPageResults(pageEntries, { quality, scale = 1, grayscale = false, sourcePdfPath = null } = {}) {
+  if (!Array.isArray(pageEntries) || pageEntries.length === 0) {
+    throw new Error('No page entries provided for raster PDF generation');
+  }
+
+  const rasterPages = [];
+  for (const pageEntry of pageEntries) {
+    const imageBuffer = await buildRasterPageImage(pageEntry, { quality, scale, grayscale });
+    rasterPages.push({
+      imageBuffer,
+      borderData: pageEntry.borderData,
+      pageSize: pageEntry.pageSize,
+      pageNumber: pageEntry.pageNumber
+    });
+  }
+
+  return await createRasterizedPdf(rasterPages, sourcePdfPath);
 }
 
 /**
@@ -769,6 +856,23 @@ async function processImage(imagePath, options = {}) {
 
   const ext = path.extname(imagePath).toLowerCase().slice(1);
   const isPdf = ext === 'pdf';
+  let cachedPdfPageSizes = null;
+  let effectiveTimeout = timeout;
+
+  if (isPdf) {
+    try {
+      cachedPdfPageSizes = await getPdfPageSizes(imagePath);
+      const pdfPageCount = cachedPdfPageSizes.length || 1;
+      const perPageBudget = options.pdfTimeoutPerPage ?? CONFIG.PDF_TIMEOUT_PER_PAGE;
+      effectiveTimeout = Math.max(timeout, CONFIG.TIMEOUT_MS + Math.max(pdfPageCount - 1, 0) * perPageBudget);
+      logger.info(`[BorderDetector] PDF metadata loaded: ${pdfPageCount} pages. Timeout budget set to ${effectiveTimeout}ms`);
+    } catch (metaError) {
+      const fallbackTimeout = CONFIG.TIMEOUT_MS * 4;
+      effectiveTimeout = Math.max(timeout, fallbackTimeout);
+      logger.warn(`[BorderDetector] Could not pre-read PDF page sizes for ${imagePath}: ${metaError.message}. Using fallback timeout ${effectiveTimeout}ms`);
+      cachedPdfPageSizes = null;
+    }
+  }
 
   // DEBUG: Add unique call tracking
   const callId = `processImage_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
@@ -778,7 +882,7 @@ async function processImage(imagePath, options = {}) {
 
   // Create timeout promise
   const timeoutPromise = new Promise((_, reject) => {
-    setTimeout(() => reject(new Error('Processing timeout')), timeout);
+    setTimeout(() => reject(new Error('Processing timeout')), effectiveTimeout);
   });
 
   // Main processing promise
@@ -793,42 +897,32 @@ async function processImage(imagePath, options = {}) {
       if (!validation.valid) {
         throw new Error(validation.error);
       }
-      let imageBuffer, imageMeta;
+
+      // Track original file size so final exports never exceed it
+      const originalFileStats = await fs.stat(imagePath);
+      const originalFileSize = originalFileStats.size;
+      const pdfQualitySetting = Math.min(Math.max(options.pdfQuality ?? 85, 10), 95);
+
       if (isPdf) {
-        logger.info(`[BorderDetector] Detected PDF, converting first page to image: ${imagePath}`);
-        try {
-          if (signal && signal.aborted) throw new Error('PDF conversion aborted by signal');
-          
-          // First convert the PDF to an image buffer
-          imageBuffer = await convertPdfToImageBuffer(imagePath);
-          imageMeta = await sharp(imageBuffer).metadata();
-          logger.info(`[BorderDetector] PDF page converted. Initial dimensions: ${imageMeta.width}x${imageMeta.height}`);
-          
-          // CRITICAL FIX: Always force portrait orientation for documents
-          // This ensures the document appears as it would in a PDF viewer
-          if (imageMeta.width > imageMeta.height) {
-            logger.info(`[BorderDetector] Forcing portrait orientation for document`);
-            imageBuffer = await sharp(imageBuffer)
-              .rotate(90, { background: { r: 255, g: 255, b: 255, alpha: 1 } })
-              .toBuffer();
-            
-            // Update metadata after rotation
-            imageMeta = await sharp(imageBuffer).metadata();
-            logger.info(`[BorderDetector] Document rotated to portrait. New dimensions: ${imageMeta.width}x${imageMeta.height}`);
-          } else {
-            logger.info(`[BorderDetector] Document already in portrait orientation`);
-          }
-          
-          logger.info(`[BorderDetector] Processing document with correct orientation`);
-        } catch (conversionError) {
-          logger.error(`[BorderDetector] PDF to Image conversion failed for ${imagePath}: ${conversionError.message}`);
-          throw conversionError;
-        }
-      } else {
-        imageBuffer = await fs.readFile(imagePath);
-        // Don't auto-rotate to prevent distortion
-        imageMeta = await sharp(imageBuffer).metadata();
+        return await processPdfDocument({
+          imagePath,
+          threshold,
+          outputPath,
+          outputDir: options.outputDir,
+          runDate,
+          originalFileSize,
+          pdfQualitySetting,
+          enforcedOutputFormat,
+          callId,
+          startTime,
+          signal,
+          pageSizeHints: cachedPdfPageSizes
+        });
       }
+
+      let imageBuffer = await fs.readFile(imagePath);
+      // Don't auto-rotate to prevent distortion
+      let imageMeta = await sharp(imageBuffer).metadata();
       logger.info(`[BorderDetector] Image loaded: ${imageMeta.format || ''}`);
       // Detect borders
       const borderData = await detectBorders(imageBuffer, { threshold });
@@ -881,6 +975,16 @@ async function processImage(imagePath, options = {}) {
         preserveOrientation: true, // Always preserve original orientation
         outputFormat: enforcedOutputFormat
       });
+      const croppedMeta = await sharp(croppedBuffer).metadata();
+      const singlePageEntry = {
+        pageNumber: 1,
+        borderData,
+        hasBorders: borderData.hasBorders,
+        croppedBuffer,
+        croppedMeta,
+        imageMeta,
+        pageSize: derivePageSizeFromMetadata(imageMeta)
+      };
       // Generate output path
       let finalOutputPath;
       const baseOutputDir = options.outputDir || path.join(path.dirname(imagePath), `${runDate}_processed`);
@@ -904,41 +1008,77 @@ async function processImage(imagePath, options = {}) {
 
       if (actualOutputFormat === 'pdf') {
         if (isPdf) {
-        try {
-          logger.info('[BorderDetector] Attempting vector-aware PDF crop via page boxes');
-          await cropPdfVector(imagePath, finalOutputPath, borderData);
-          wroteFileDirectly = true;
-          processedSize = (await fs.stat(finalOutputPath)).size;
-          logger.info('[BorderDetector] Vector crop succeeded, PDF saved without rasterization.');
-        } catch (vectorError) {
-          logger.error('[BorderDetector] Vector PDF cropping failed, falling back to raster export:', vectorError);
-          // Convert cropped buffer to high-quality JPEG to keep PDF size manageable
-          const pdfImageQuality = Math.min(Math.max(options.pdfQuality ?? 85, 10), 95);
-          const pdfImageBuffer = await sharp(croppedBuffer)
-            .jpeg({
-              quality: pdfImageQuality,
-              mozjpeg: true,
-              chromaSubsampling: '4:4:4'
-            })
-            .toBuffer();
-          outputBuffer = await createRasterizedPdf(pdfImageBuffer, borderData, imagePath);
-          processedSize = outputBuffer.length;
-          logger.info(`[BorderDetector] Raster PDF fallback size: ${(processedSize / 1024).toFixed(1)}KB`);
-        }
+          try {
+            logger.info('[BorderDetector] Attempting vector-aware PDF crop via page boxes');
+            await cropPdfVector(imagePath, finalOutputPath, borderData);
+            wroteFileDirectly = true;
+            processedSize = (await fs.stat(finalOutputPath)).size;
+            logger.info('[BorderDetector] Vector crop succeeded, PDF saved without rasterization.');
+
+            if (processedSize > originalFileSize) {
+              logger.warn(`[BorderDetector] Vector crop output (${processedSize} bytes) exceeds original file (${originalFileSize} bytes). Applying rasterized fallback to enforce size limit.`);
+              const constrained = await enforcePdfSizeLimit({
+                currentPdfBuffer: null,
+                pageEntries: [singlePageEntry],
+                sourcePdfPath: imagePath,
+                targetBytes: originalFileSize,
+                baseQuality: pdfQualitySetting
+              });
+              outputBuffer = constrained.buffer;
+              processedSize = outputBuffer.length;
+              wroteFileDirectly = false; // Overwrite with constrained buffer below
+            }
+          } catch (vectorError) {
+            logger.error('[BorderDetector] Vector PDF cropping failed, falling back to raster export:', vectorError);
+            const pdfImageBuffer = await sharp(croppedBuffer)
+              .jpeg({
+                quality: pdfQualitySetting,
+                mozjpeg: true,
+                chromaSubsampling: '4:4:4'
+              })
+              .toBuffer();
+            const rasterEntry = {
+              imageBuffer: pdfImageBuffer,
+              borderData,
+              pageSize: null,
+              pageNumber: 1
+            };
+            outputBuffer = await createRasterizedPdf([rasterEntry], imagePath);
+            processedSize = outputBuffer.length;
+            logger.info(`[BorderDetector] Raster PDF fallback size: ${(processedSize / 1024).toFixed(1)}KB`);
+          }
         } else {
-          const pdfImageQuality = Math.min(Math.max(options.pdfQuality ?? 85, 10), 95);
           const pdfImageBuffer = await sharp(croppedBuffer)
             .jpeg({
-              quality: pdfImageQuality,
+              quality: pdfQualitySetting,
               mozjpeg: true,
               chromaSubsampling: '4:4:4'
             })
             .toBuffer();
-          outputBuffer = await createRasterizedPdf(pdfImageBuffer, borderData);
+          const rasterEntry = {
+            imageBuffer: pdfImageBuffer,
+            borderData,
+            pageSize: derivePageSizeFromMetadata(imageMeta),
+            pageNumber: 1
+          };
+          outputBuffer = await createRasterizedPdf([rasterEntry]);
           processedSize = outputBuffer.length;
         }
       }
+
       if (!wroteFileDirectly) {
+        if (actualOutputFormat === 'pdf') {
+          const constrained = await enforcePdfSizeLimit({
+            currentPdfBuffer: outputBuffer,
+            pageEntries: [singlePageEntry],
+            sourcePdfPath: isPdf ? imagePath : null,
+            targetBytes: originalFileSize,
+            baseQuality: pdfQualitySetting
+          });
+          outputBuffer = constrained.buffer;
+          processedSize = outputBuffer.length;
+        }
+
         await fs.writeFile(finalOutputPath, outputBuffer);
         processedSize = processedSize ?? outputBuffer.length;
       }
@@ -955,7 +1095,7 @@ async function processImage(imagePath, options = {}) {
         newSize: { width: borderData.width, height: borderData.height },
         processingTime,
         fileSize: {
-          original: imageBuffer.length,
+          original: originalFileSize,
           processed: processedSize ?? 0
         },
         isPdf
@@ -981,6 +1121,239 @@ async function processImage(imagePath, options = {}) {
       processingTime: Date.now() - startTime
     };
   }
+}
+
+async function processPdfDocument({
+  imagePath,
+  threshold,
+  outputPath,
+  outputDir,
+  runDate,
+  originalFileSize,
+  pdfQualitySetting,
+  enforcedOutputFormat,
+  callId,
+  startTime,
+  signal,
+  pageSizeHints = null
+}) {
+  logger.info(`[DEBUG-${callId}] Multi-page PDF processing enabled for ${path.basename(imagePath)}`);
+  const baseOutputDir = outputDir || path.join(path.dirname(imagePath), `${runDate}_processed`);
+
+  let pagePlan = Array.isArray(pageSizeHints) && pageSizeHints.length
+    ? pageSizeHints.map(({ width, height, pageNumber }) => ({ width, height, pageNumber }))
+    : null;
+
+  if (!pagePlan) {
+    try {
+      const discovered = await getPdfPageSizes(imagePath);
+      pagePlan = discovered;
+      logger.info(`[BorderDetector-PDF] Loaded ${pagePlan.length} page descriptors via pdf-lib.`);
+    } catch (metaError) {
+      logger.warn(`[BorderDetector-PDF] Unable to read page sizes via pdf-lib for ${path.basename(imagePath)}: ${metaError.message}. Falling back to sequential detection.`);
+      pagePlan = null;
+    }
+  }
+
+  const pageResults = [];
+
+  const processSinglePage = async (pageInfo) => {
+    if (signal && signal.aborted) {
+      throw new Error('Processing aborted by signal');
+    }
+
+    const pageNumber = pageInfo.pageNumber;
+    logger.info(`[BorderDetector-PDF] Processing page ${pageNumber}/${pagePlan ? pagePlan.length : '?'}`);
+    let pageBuffer = await convertPdfToImageBuffer(imagePath, pageNumber);
+    let pageMeta = await sharp(pageBuffer).metadata();
+
+    if (pageMeta.width > pageMeta.height) {
+      logger.info(`[BorderDetector-PDF] Page ${pageNumber}: rotating to portrait orientation`);
+      pageBuffer = await sharp(pageBuffer)
+        .rotate(90, { background: { r: 255, g: 255, b: 255, alpha: 1 } })
+        .toBuffer();
+      pageMeta = await sharp(pageBuffer).metadata();
+    }
+
+    const borderData = await detectBorders(pageBuffer, { threshold });
+    borderData.pageNumber = pageNumber;
+
+    let croppedBuffer = pageBuffer;
+    if (borderData.hasBorders) {
+      logger.info(`[BorderDetector-PDF] Page ${pageNumber}: cropping to ${borderData.width}x${borderData.height}`);
+      croppedBuffer = await cropImage(pageBuffer, borderData, {
+        rotateFinalOutput: false,
+        preserveOrientation: true,
+        outputFormat: enforcedOutputFormat
+      });
+    } else {
+      logger.info(`[BorderDetector-PDF] Page ${pageNumber}: no borders detected`);
+    }
+
+    const croppedMeta = await sharp(croppedBuffer).metadata();
+    const resolvedPageSize = pageInfo.width && pageInfo.height
+      ? { width: pageInfo.width, height: pageInfo.height }
+      : derivePageSizeFromMetadata(pageMeta) || {
+          width: pixelsToPdfPoints(borderData.width || pageMeta.width || 1),
+          height: pixelsToPdfPoints(borderData.height || pageMeta.height || 1)
+        };
+
+    pageResults.push({
+      pageNumber,
+      borderData,
+      hasBorders: !!borderData.hasBorders,
+      croppedBuffer,
+      croppedMeta,
+      imageMeta: pageMeta,
+      pageSize: resolvedPageSize
+    });
+  };
+
+  if (pagePlan) {
+    for (const pageInfo of pagePlan) {
+      try {
+        await processSinglePage(pageInfo);
+      } catch (error) {
+        if (error instanceof PdfPageOutOfRangeError) {
+          logger.warn(`[BorderDetector-PDF] Page ${pageInfo.pageNumber} reported by metadata but converter returned out-of-range. Stopping at previous page.`);
+          break;
+        }
+        throw error;
+      }
+    }
+  } else {
+    let pageNumber = 1;
+    while (true) {
+      const fallbackInfo = { pageNumber };
+      try {
+        await processSinglePage(fallbackInfo);
+        pageNumber++;
+      } catch (error) {
+        if (error instanceof PdfPageOutOfRangeError) {
+          if (pageNumber === 1) {
+            throw new Error('Unable to read any pages from PDF. File may be corrupted or encrypted.');
+          }
+          logger.info(`[BorderDetector-PDF] Reached end of document at page ${pageNumber - 1}. Total pages processed: ${pageResults.length}`);
+          break;
+        }
+        throw error;
+      }
+    }
+  }
+
+  const totalPages = pageResults.length;
+  if (totalPages === 0) {
+    throw new Error('No PDF pages could be processed. Document may be unsupported.');
+  }
+
+  const pagesWithBorders = pageResults.filter(page => page.hasBorders);
+  const baseName = path.basename(imagePath, path.extname(imagePath));
+  const processedSuffix = totalPages > 1 ? '_processed.pdf' : '_page1_processed.pdf';
+  const croppedSuffix = totalPages > 1 ? '_cropped.pdf' : '_page1_cropped.pdf';
+  const pageMetadata = pageResults.map(({ pageNumber, borderData }) => ({ pageNumber, borderData }));
+
+  if (pagesWithBorders.length === 0) {
+    const targetPath = outputPath || path.join(baseOutputDir, `${baseName}${processedSuffix}`);
+    await ensureOutputDirectory(targetPath);
+    await fs.copyFile(imagePath, targetPath);
+    const processedSize = (await fs.stat(targetPath)).size;
+    const processingTime = Date.now() - startTime;
+    logger.info(`[BorderDetector-PDF] No borders found across ${totalPages} pages. Copied original to ${targetPath}`);
+    return {
+      success: true,
+      originalPath: imagePath,
+      processedPath: targetPath,
+      cropped: false,
+      message: 'No borders detected - original saved',
+      processingTime,
+      borderData: pageResults.length === 1 ? pageResults[0].borderData : null,
+      borderDataPages: pageMetadata,
+      originalSize: pageResults[0]?.imageMeta,
+      newSize: null,
+      fileSize: {
+        original: originalFileSize,
+        processed: processedSize
+      },
+      pagesProcessed: totalPages,
+      isPdf: true
+    };
+  }
+
+  const finalOutputPath = outputPath || path.join(baseOutputDir, `${baseName}${croppedSuffix}`);
+  await ensureOutputDirectory(finalOutputPath);
+
+  let processedSize = 0;
+  let vectorSucceeded = false;
+
+  try {
+    await cropPdfVector(imagePath, finalOutputPath, pageResults);
+    processedSize = (await fs.stat(finalOutputPath)).size;
+    vectorSucceeded = true;
+    logger.info('[BorderDetector-PDF] Vector crop applied to PDF pages.');
+  } catch (vectorError) {
+    logger.error('[BorderDetector-PDF] Vector PDF cropping failed, falling back to raster export:', vectorError);
+  }
+
+  if (vectorSucceeded && processedSize <= originalFileSize) {
+    const processingTime = Date.now() - startTime;
+    return {
+      success: true,
+      originalPath: imagePath,
+      processedPath: finalOutputPath,
+      cropped: true,
+      borderData: pageResults.length === 1 ? pageResults[0].borderData : null,
+      borderDataPages: pageMetadata,
+      originalSize: pageResults[0]?.imageMeta,
+      newSize: pageResults.length === 1 ? { width: pageResults[0].borderData.width, height: pageResults[0].borderData.height } : null,
+      processingTime,
+      fileSize: {
+        original: originalFileSize,
+        processed: processedSize
+      },
+      pagesProcessed: totalPages,
+      isPdf: true
+    };
+  }
+
+  const baseRasterBuffer = await buildRasterPdfFromPageResults(pageResults, {
+    quality: pdfQualitySetting,
+    sourcePdfPath: imagePath
+  });
+
+  if (vectorSucceeded) {
+    logger.warn(`[BorderDetector-PDF] Vector crop output (${processedSize} bytes) exceeds original (${originalFileSize} bytes). Regenerating raster PDF to enforce size limit.`);
+  }
+
+  const constrained = await enforcePdfSizeLimit({
+    currentPdfBuffer: baseRasterBuffer,
+    pageEntries: pageResults,
+    targetBytes: originalFileSize,
+    baseQuality: pdfQualitySetting,
+    sourcePdfPath: imagePath
+  });
+
+  await fs.writeFile(finalOutputPath, constrained.buffer);
+  processedSize = constrained.buffer.length;
+  const processingTime = Date.now() - startTime;
+  logger.info(`[BorderDetector-PDF] Raster PDF saved to ${finalOutputPath} (${(processedSize / 1024).toFixed(1)}KB).`);
+
+  return {
+    success: true,
+    originalPath: imagePath,
+    processedPath: finalOutputPath,
+    cropped: true,
+    borderData: pageResults.length === 1 ? pageResults[0].borderData : null,
+    borderDataPages: pageMetadata,
+    originalSize: pageResults[0]?.imageMeta,
+    newSize: pageResults.length === 1 ? { width: pageResults[0].borderData.width, height: pageResults[0].borderData.height } : null,
+    processingTime,
+    fileSize: {
+      original: originalFileSize,
+      processed: processedSize
+    },
+    pagesProcessed: totalPages,
+    isPdf: true
+  };
 }
 
 /**
@@ -1142,108 +1515,260 @@ async function processBatch(imagePaths, options = {}, progressCallback = null) {
 
 const clampValue = (value, min, max) => Math.min(Math.max(value, min), max);
 
-async function cropPdfVector(originalPdfPath, outputPdfPath, borderData) {
+async function cropPdfVector(originalPdfPath, outputPdfPath, pageCropEntries) {
   const pdfBytes = await fs.readFile(originalPdfPath);
   const pdfDoc = await PdfLibDocument.load(pdfBytes);
   const pages = pdfDoc.getPages();
   if (pages.length === 0) {
     throw new Error('PDF has no pages to crop');
   }
-  const page = pages[0];
-  const { width: pageWidth, height: pageHeight } = page.getSize();
 
-  const originalDims = borderData.originalDimensions || borderData.metadata?.originalSize;
-  if (!originalDims?.width || !originalDims?.height) {
-    throw new Error('Missing original dimensions for vector PDF cropping');
+  const entries = Array.isArray(pageCropEntries)
+    ? pageCropEntries
+    : [{ pageNumber: 1, borderData: pageCropEntries }];
+
+  for (const entry of entries) {
+    const { borderData, pageNumber = 1 } = entry || {};
+    if (!borderData || !borderData.hasBorders) {
+      continue;
+    }
+
+    const pageIndex = Math.min(Math.max(pageNumber - 1, 0), pages.length - 1);
+    const page = pages[pageIndex];
+    const { width: pageWidth, height: pageHeight } = page.getSize();
+
+    const originalDims = borderData.originalDimensions || borderData.metadata?.originalSize;
+    if (!originalDims?.width || !originalDims?.height) {
+      throw new Error('Missing original dimensions for vector PDF cropping');
+    }
+
+    const pixelWidth = originalDims.width;
+    const pixelHeight = originalDims.height;
+
+    const leftPx = borderData.left ?? borderData.borderSizes?.left ?? 0;
+    const topPx = borderData.top ?? borderData.borderSizes?.top ?? 0;
+    const cropWidthPx = borderData.width ?? (pixelWidth - leftPx - (borderData.borderSizes?.right ?? 0));
+    const cropHeightPx = borderData.height ?? (pixelHeight - topPx - (borderData.borderSizes?.bottom ?? 0));
+    const bottomPx = Math.max(pixelHeight - (topPx + cropHeightPx), 0);
+
+    const toPdfX = (px) => (px / pixelWidth) * pageWidth;
+    const toPdfY = (px) => (px / pixelHeight) * pageHeight;
+
+    let x = toPdfX(leftPx);
+    let y = toPdfY(bottomPx);
+    let w = toPdfX(cropWidthPx);
+    let h = toPdfY(cropHeightPx);
+
+    const minSize = 0.5;
+    x = clampValue(x, 0, Math.max(pageWidth - minSize, 0));
+    y = clampValue(y, 0, Math.max(pageHeight - minSize, 0));
+    w = clampValue(w, minSize, pageWidth - x);
+    h = clampValue(h, minSize, pageHeight - y);
+
+    page.setMediaBox(x, y, w, h);
+    page.setCropBox(x, y, w, h);
+    page.setTrimBox(x, y, w, h);
+    page.setBleedBox(x, y, w, h);
   }
-
-  const pixelWidth = originalDims.width;
-  const pixelHeight = originalDims.height;
-
-  const leftPx = borderData.left ?? borderData.borderSizes?.left ?? 0;
-  const topPx = borderData.top ?? borderData.borderSizes?.top ?? 0;
-  const cropWidthPx = borderData.width ?? (pixelWidth - leftPx - (borderData.borderSizes?.right ?? 0));
-  const cropHeightPx = borderData.height ?? (pixelHeight - topPx - (borderData.borderSizes?.bottom ?? 0));
-  const bottomPx = Math.max(pixelHeight - (topPx + cropHeightPx), 0);
-
-  const toPdfX = (px) => (px / pixelWidth) * pageWidth;
-  const toPdfY = (px) => (px / pixelHeight) * pageHeight;
-
-  let x = toPdfX(leftPx);
-  let y = toPdfY(bottomPx);
-  let w = toPdfX(cropWidthPx);
-  let h = toPdfY(cropHeightPx);
-
-  const minSize = 0.5;
-  x = clampValue(x, 0, Math.max(pageWidth - minSize, 0));
-  y = clampValue(y, 0, Math.max(pageHeight - minSize, 0));
-  w = clampValue(w, minSize, pageWidth - x);
-  h = clampValue(h, minSize, pageHeight - y);
-
-  page.setMediaBox(x, y, w, h);
-  page.setCropBox(x, y, w, h);
-  page.setTrimBox(x, y, w, h);
-  page.setBleedBox(x, y, w, h);
 
   const croppedPdfBytes = await pdfDoc.save();
   await fs.writeFile(outputPdfPath, croppedPdfBytes);
 }
 
-async function createRasterizedPdf(imageBuffer, borderData, sourcePdfPath = null) {
-  let widthPoints = borderData.width;
-  let heightPoints = borderData.height;
-
-  if (sourcePdfPath) {
-    try {
-      const { width: pageWidth, height: pageHeight } = await getPdfPageSize(sourcePdfPath);
-      const originalDims = borderData.originalDimensions || borderData.metadata?.originalSize;
-      if (originalDims?.width && originalDims?.height) {
-        widthPoints = clampValue(
-          (borderData.width / originalDims.width) * pageWidth,
-          1,
-          pageWidth
-        );
-        heightPoints = clampValue(
-          (borderData.height / originalDims.height) * pageHeight,
-          1,
-          pageHeight
-        );
-      }
-    } catch (err) {
-      logger.warn('[BorderDetector] Using pixel dimensions for raster PDF fallback size due to page size lookup failure.', err);
-    }
+async function createRasterizedPdf(pageEntries, sourcePdfPath = null) {
+  const entries = Array.isArray(pageEntries) ? pageEntries : [pageEntries];
+  if (entries.length === 0) {
+    throw new Error('No pages provided for raster PDF creation');
   }
 
-  const doc = new PdfKitDocument({
-    size: [widthPoints, heightPoints],
-    margin: 0
-  });
-
+  const doc = new PdfKitDocument({ autoFirstPage: false });
   const pdfChunks = [];
+
+  const resolvePageSize = async (entry, index) => {
+    const originalDims = entry.borderData?.originalDimensions || entry.borderData?.metadata?.originalSize;
+    const providedSize = entry.pageSize;
+    let widthPoints = entry.borderData?.width || providedSize?.width || 1;
+    let heightPoints = entry.borderData?.height || providedSize?.height || 1;
+
+    if (providedSize && originalDims?.width && originalDims?.height) {
+      widthPoints = clampValue(
+        (entry.borderData.width / originalDims.width) * providedSize.width,
+        1,
+        providedSize.width
+      );
+      heightPoints = clampValue(
+        (entry.borderData.height / originalDims.height) * providedSize.height,
+        1,
+        providedSize.height
+      );
+    } else if (!providedSize && sourcePdfPath) {
+      try {
+        const { width: pageWidth, height: pageHeight } = await getPdfPageSize(sourcePdfPath, index);
+        if (originalDims?.width && originalDims?.height) {
+          widthPoints = clampValue(
+            (entry.borderData.width / originalDims.width) * pageWidth,
+            1,
+            pageWidth
+          );
+          heightPoints = clampValue(
+            (entry.borderData.height / originalDims.height) * pageHeight,
+            1,
+            pageHeight
+          );
+        } else {
+          widthPoints = pageWidth;
+          heightPoints = pageHeight;
+        }
+      } catch (err) {
+        logger.warn('[BorderDetector] Falling back to pixel dimensions for raster PDF page sizing.', err);
+      }
+    }
+
+    return { width: Math.max(widthPoints, 1), height: Math.max(heightPoints, 1) };
+  };
 
   return await new Promise((resolve, reject) => {
     doc.on('data', chunk => pdfChunks.push(chunk));
     doc.on('end', () => resolve(Buffer.concat(pdfChunks)));
     doc.on('error', reject);
 
-    doc.image(imageBuffer, 0, 0, {
-      width: widthPoints,
-      height: heightPoints,
-      align: 'center',
-      valign: 'center'
-    });
-    doc.end();
+    (async () => {
+      for (let i = 0; i < entries.length; i++) {
+        const entry = entries[i];
+        if (!entry?.imageBuffer || !entry?.borderData) {
+          throw new Error('Raster PDF entry missing image buffer or border data');
+        }
+        const { width, height } = await resolvePageSize(entry, entry.pageNumber ? entry.pageNumber - 1 : i);
+        doc.addPage({ size: [width, height], margin: 0 });
+        doc.image(entry.imageBuffer, 0, 0, {
+          width,
+          height,
+          align: 'center',
+          valign: 'center'
+        });
+      }
+      doc.end();
+    })().catch(reject);
   });
 }
 
-async function getPdfPageSize(pdfPath) {
+async function enforcePdfSizeLimit({
+  currentPdfBuffer,
+  pageEntries,
+  targetBytes,
+  baseQuality = 85,
+  sourcePdfPath = null
+}) {
+  const hasPages = Array.isArray(pageEntries) && pageEntries.length > 0;
+
+  if (!hasPages) {
+    return {
+      buffer: currentPdfBuffer,
+      satisfied: currentPdfBuffer ? currentPdfBuffer.length <= targetBytes : false
+    };
+  }
+
+  if (!targetBytes || targetBytes <= 0) {
+    const fallbackBuffer = currentPdfBuffer && currentPdfBuffer.length > 0
+      ? currentPdfBuffer
+      : await buildRasterPdfFromPageResults(pageEntries, { quality: baseQuality, sourcePdfPath });
+    return {
+      buffer: fallbackBuffer,
+      satisfied: true
+    };
+  }
+
+  if (currentPdfBuffer && currentPdfBuffer.length <= targetBytes) {
+    return { buffer: currentPdfBuffer, satisfied: true };
+  }
+
+  const MIN_QUALITY = 5;
+  const QUALITY_STEP = 5;
+  const MIN_SCALE = 0.05;
+  const SCALE_STEP = 0.1;
+  const normalizedBaseQuality = Math.min(Math.max(Math.round(baseQuality), MIN_QUALITY), 95);
+
+  let bestCandidate = null;
+  if (currentPdfBuffer) {
+    bestCandidate = { buffer: currentPdfBuffer, length: currentPdfBuffer.length, scale: 1, quality: normalizedBaseQuality };
+  } else {
+    const basePdf = await buildRasterPdfFromPageResults(pageEntries, {
+      quality: normalizedBaseQuality,
+      sourcePdfPath
+    });
+    bestCandidate = { buffer: basePdf, length: basePdf.length, scale: 1, quality: normalizedBaseQuality };
+    if (basePdf.length <= targetBytes) {
+      return { buffer: basePdf, satisfied: true };
+    }
+  }
+
+  const qualityLevels = [];
+  for (let q = normalizedBaseQuality; q >= MIN_QUALITY; q -= QUALITY_STEP) {
+    qualityLevels.push(Math.round(q));
+  }
+  if (!qualityLevels.includes(MIN_QUALITY)) {
+    qualityLevels.push(MIN_QUALITY);
+  }
+
+  const scaleLevels = [];
+  for (let scale = 1; scale >= MIN_SCALE - 1e-6; scale -= SCALE_STEP) {
+    const rounded = Number(scale.toFixed(2));
+    if (!scaleLevels.includes(rounded)) {
+      scaleLevels.push(rounded);
+    }
+  }
+  if (!scaleLevels.includes(MIN_SCALE)) {
+    scaleLevels.push(MIN_SCALE);
+  }
+
+  const baseQualityRounded = Math.round(normalizedBaseQuality);
+
+  for (const scale of scaleLevels) {
+    for (const quality of qualityLevels) {
+      if (scale === 1 && quality === baseQualityRounded && !currentPdfBuffer) {
+        continue; // Already evaluated base combination
+      }
+
+      const grayscale = quality <= 40;
+      const candidatePdf = await buildRasterPdfFromPageResults(pageEntries, {
+        quality,
+        scale,
+        grayscale,
+        sourcePdfPath
+      });
+
+      if (!bestCandidate || candidatePdf.length < bestCandidate.length) {
+        bestCandidate = { buffer: candidatePdf, length: candidatePdf.length, scale, quality };
+      }
+
+      if (candidatePdf.length <= targetBytes) {
+        logger.info(`[BorderDetector] PDF size enforcement succeeded at quality ${quality} and scale ${(scale * 100).toFixed(0)}% (size ${(candidatePdf.length / 1024).toFixed(1)}KB).`);
+        return { buffer: candidatePdf, satisfied: true };
+      }
+    }
+  }
+
+  if (bestCandidate) {
+    logger.warn(`[BorderDetector] Could not reduce PDF below original size (${targetBytes} bytes). Using smallest available output (${bestCandidate.length} bytes).`);
+    return { buffer: bestCandidate.buffer, satisfied: bestCandidate.length <= targetBytes };
+  }
+
+  logger.warn('[BorderDetector] Size enforcement failed: returning original PDF buffer.');
+  return {
+    buffer: currentPdfBuffer,
+    satisfied: currentPdfBuffer ? currentPdfBuffer.length <= targetBytes : false
+  };
+}
+
+async function getPdfPageSize(pdfPath, pageIndex = 0) {
   const pdfBytes = await fs.readFile(pdfPath);
   const pdfDoc = await PdfLibDocument.load(pdfBytes);
   const pages = pdfDoc.getPages();
   if (pages.length === 0) {
     throw new Error('PDF has no pages');
   }
-  return pages[0].getSize();
+  const index = Math.min(Math.max(pageIndex, 0), pages.length - 1);
+  return pages[index].getSize();
 }
 
 // Export the enhanced border detection module

@@ -65,7 +65,8 @@
     "productName": "Black Border Remover",
     "files": [
       "dist/**/*",
-      "electron/**/*"
+      "electron/**/*",
+      "WINDOWS-README.txt"
     ],
     "directories": {
       "output": "release"

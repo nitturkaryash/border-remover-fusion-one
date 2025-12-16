@@ -25,24 +25,23 @@ Offline Electron app for batch detection/cropping of black borders in images and
 **macOS:**
 ```bash
 # Install required dependencies via Homebrew
-brew install ghostscript graphicsmagick
+brew install ghostscript
 ```
 
 **Linux (Ubuntu/Debian):**
 ```bash
 sudo apt-get update
-sudo apt-get install ghostscript graphicsmagick imagemagick
+sudo apt-get install ghostscript
 ```
 
 **Windows:**
-- Download and install [Ghostscript](https://www.ghostscript.com/download/gsdnld.html)
-- Download and install [GraphicsMagick](http://www.graphicsmagick.org/download.html)
-- Ensure both are added to your system PATH
+- Download and install [Ghostscript (64-bit)](https://www.ghostscript.com/download/gsdnld.html)
+- Verify from Command Prompt: `gswin64c -version`
+- Ensure it is added to your system PATH (reopen the terminal after install)
 
 ### Why these dependencies?
 - **Ghostscript**: Required for PDF rendering and conversion
-- **GraphicsMagick**: Required for image processing operations
-- Without these, PDF processing will fail with empty output folders
+- Without this, PDF processing will fail with empty output folders
 
 ## Installation
 
@@ -92,10 +91,9 @@ If you get an empty output folder after processing:
    ```bash
    # macOS - verify installations
    gs -version
-   gm version
    
    # If missing, install with:
-   brew install ghostscript graphicsmagick
+   brew install ghostscript
    ```
 
 2. **Check file formats**: Ensure files are supported (JPG, PNG, TIFF, PDF)
@@ -105,7 +103,7 @@ If you get an empty output folder after processing:
 4. **Check application logs**: Look for detailed error messages in the console
 
 ### PDF Processing Issues
-- Ensure **Ghostscript** and **GraphicsMagick** are installed and in your system PATH
+- Ensure **Ghostscript** is installed and in your system PATH
 - Verify PDF files are not corrupted or password-protected
 - Check that PDFs contain visual content (text-only PDFs may not process correctly)
 
